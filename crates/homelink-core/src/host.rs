@@ -18,7 +18,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 
-use homelink_proto::{close, encode_udp_frame, read_udp_frame, short_id, DeviceId, Request, Status, Target};
+use bytes::Bytes;
+use homelink_proto::{
+    close, encode_udp_datagram, encode_udp_frame, parse_udp_datagram, read_udp_frame, short_id, DeviceId,
+    Request, Status, Target,
+};
+use tokio::sync::mpsc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Notify, OwnedSemaphorePermit, Semaphore};
@@ -99,6 +104,45 @@ struct LiveConn {
     id: DeviceId,
     name: String,
     conn: quinn::Connection,
+}
+
+/// QUIC datagram routes for one connection: association id → UDP relay.
+type Routes = Arc<Mutex<HashMap<u32, mpsc::Sender<Bytes>>>>;
+
+/// Lets a UDP relay use QUIC datagrams on its connection.
+#[derive(Clone)]
+struct DgramCtx {
+    conn: quinn::Connection,
+    routes: Routes,
+}
+
+/// A registered datagram route; removed from the table when dropped.
+struct HostDgram {
+    conn: quinn::Connection,
+    assoc: u32,
+    rx: mpsc::Receiver<Bytes>,
+    routes: Routes,
+}
+
+impl Drop for HostDgram {
+    fn drop(&mut self) {
+        self.routes.lock().unwrap().remove(&self.assoc);
+    }
+}
+
+/// Read datagrams on a connection and hand them to the matching UDP relay.
+async fn dispatch_datagrams(conn: quinn::Connection, routes: Routes) {
+    while let Ok(b) = conn.read_datagram().await {
+        if b.len() < 4 {
+            continue;
+        }
+        let assoc = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        let tx = routes.lock().unwrap().get(&assoc).cloned();
+        if let Some(tx) = tx {
+            // Full queue: drop, as UDP would.
+            let _ = tx.try_send(b);
+        }
+    }
 }
 
 struct LiveTcp {
@@ -330,10 +374,13 @@ async fn serve_device(conn: quinn::Connection, id: DeviceId, name: String, share
     debug!("{name} connected from {}", conn.remote_address());
     shared.emit(HostEvent::Connected { id, name: name.clone() });
 
+    let dgram = DgramCtx { conn: conn.clone(), routes: Arc::new(Mutex::new(HashMap::new())) };
+    let dispatcher = tokio::spawn(dispatch_datagrams(conn.clone(), dgram.routes.clone()));
     while let Ok((send, recv)) = conn.accept_bi().await {
         let shared = shared.clone();
-        tokio::spawn(serve_request(recv, send, shared));
+        tokio::spawn(serve_request(recv, send, shared, Some(dgram.clone())));
     }
+    dispatcher.abort();
 
     shared.live.lock().unwrap().remove(&key);
     shared.emit(HostEvent::Disconnected { id, name });
@@ -385,7 +432,7 @@ async fn handle_tcp(
                 decide_pairing(id, &secret, name, &shared).await?
             }
             Request::Pair { .. } => Status::Denied,
-            Request::Connect(_) | Request::Udp => Status::NotPaired,
+            Request::Connect(_) | Request::Udp { .. } => Status::NotPaired,
         };
         reply(&mut w, status).await?;
         let _ = w.shutdown().await;
@@ -403,7 +450,7 @@ async fn handle_tcp(
         .unwrap()
         .insert(key, LiveTcp { id, name, stop: stop.clone() });
     tokio::select! {
-        _ = serve_request(r, w, shared.clone()) => {}
+        _ = serve_request(r, w, shared.clone(), None) => {}
         _ = stop.notified() => {}
     }
     shared.live_tcp.lock().unwrap().remove(&key);
@@ -419,7 +466,7 @@ async fn reply<W: AsyncWrite + Unpin>(w: &mut W, status: Status) -> std::io::Res
     w.flush().await
 }
 
-async fn serve_request<R, W>(mut recv: R, mut send: W, shared: Arc<Shared>)
+async fn serve_request<R, W>(mut recv: R, mut send: W, shared: Arc<Shared>, dgram: Option<DgramCtx>)
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -438,9 +485,21 @@ where
             let _ = reply(&mut send, Status::Ok).await;
             let _ = send.shutdown().await;
         }
-        Request::Udp => {
+        Request::Udp { assoc } => {
+            // Register the datagram route (QUIC only) before answering, so
+            // the first datagram after "Ok" already has somewhere to go.
+            let dg = dgram.and_then(|d| {
+                let mut routes = d.routes.lock().unwrap();
+                if routes.contains_key(&assoc) {
+                    return None; // id clash: this relay uses the stream only
+                }
+                let (tx, rx) = mpsc::channel(256);
+                routes.insert(assoc, tx);
+                drop(routes);
+                Some(HostDgram { conn: d.conn, assoc, rx, routes: d.routes })
+            });
             if reply(&mut send, Status::Ok).await.is_ok() {
-                udp_relay(recv, send, &shared).await;
+                udp_relay(recv, send, &shared, dg).await;
             }
         }
         Request::Connect(target) => match open_target(&target, &shared.opts).await {
@@ -469,10 +528,30 @@ async fn recv_opt(sock: &Option<UdpSocket>, buf: &mut [u8]) -> std::io::Result<(
     }
 }
 
-/// Relay UDP datagrams between a device and the internet. Destinations get
-/// the same local-network rules as TCP; replies are only accepted from
+/// Next datagram for this relay, or pending forever if there is none.
+async fn next_dgram(dg: &mut Option<HostDgram>) -> Option<(Target, Vec<u8>)> {
+    let Some(d) = dg.as_mut() else { return std::future::pending().await };
+    match d.rx.recv().await {
+        Some(b) => parse_udp_datagram(&b).ok().map(|(_, t, p)| (t, p.to_vec())),
+        None => {
+            *dg = None;
+            None
+        }
+    }
+}
+
+enum UdpEvent {
+    Out(Target, Vec<u8>),
+    In(SocketAddr, Vec<u8>),
+    Skip,
+    End,
+}
+
+/// Relay UDP datagrams between a device and the internet. Packets travel as
+/// QUIC datagrams when possible, else as frames on the stream. Destinations
+/// get the same local-network rules as TCP; replies are only accepted from
 /// addresses the device has sent to.
-async fn udp_relay<R, W>(mut recv: R, mut send: W, shared: &Shared)
+async fn udp_relay<R, W>(mut recv: R, mut send: W, shared: &Shared, mut dg: Option<HostDgram>)
 where
     R: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -484,9 +563,28 @@ where
     let mut buf4 = vec![0u8; 65_536];
     let mut buf6 = vec![0u8; 65_536];
     loop {
-        tokio::select! {
-            frame = timeout(UDP_IDLE, read_udp_frame(&mut recv)) => {
-                let Ok(Ok(Some((target, payload)))) = frame else { break };
+        let event = tokio::select! {
+            frame = timeout(UDP_IDLE, read_udp_frame(&mut recv)) => match frame {
+                Ok(Ok(Some((t, p)))) => UdpEvent::Out(t, p),
+                _ => UdpEvent::End,
+            },
+            d = next_dgram(&mut dg) => match d {
+                Some((t, p)) => UdpEvent::Out(t, p),
+                None => UdpEvent::Skip,
+            },
+            r = v4.recv_from(&mut buf4) => match r {
+                Ok((n, from)) => UdpEvent::In(from, buf4[..n].to_vec()),
+                Err(_) => UdpEvent::Skip,
+            },
+            r = recv_opt(&v6, &mut buf6) => match r {
+                Ok((n, from)) => UdpEvent::In(from, buf6[..n].to_vec()),
+                Err(_) => UdpEvent::Skip,
+            },
+        };
+        match event {
+            UdpEvent::End => break,
+            UdpEvent::Skip => {}
+            UdpEvent::Out(target, payload) => {
                 let dest = match &target {
                     Target::Addr(a) => Some(*a),
                     Target::Domain(d, port) => {
@@ -511,19 +609,24 @@ where
                     }
                 }
             }
-            r = v4.recv_from(&mut buf4) => {
-                let Ok((n, from)) = r else { continue };
-                if !peers.contains(&from) { continue }
-                let Some(frame) = encode_udp_frame(&Target::Addr(from), &buf4[..n]) else { continue };
-                if send.write_all(&frame).await.is_err() || send.flush().await.is_err() { break }
-                shared.traffic.down.fetch_add(n as u64, Ordering::Relaxed);
-            }
-            r = recv_opt(&v6, &mut buf6) => {
-                let Ok((n, from)) = r else { continue };
-                if !peers.contains(&from) { continue }
-                let Some(frame) = encode_udp_frame(&Target::Addr(from), &buf6[..n]) else { continue };
-                if send.write_all(&frame).await.is_err() || send.flush().await.is_err() { break }
-                shared.traffic.down.fetch_add(n as u64, Ordering::Relaxed);
+            UdpEvent::In(from, data) => {
+                if !peers.contains(&from) {
+                    continue;
+                }
+                let src = Target::Addr(from);
+                if let Some(d) = &dg {
+                    let pkt = encode_udp_datagram(d.assoc, &src, &data);
+                    let fits = d.conn.max_datagram_size().is_some_and(|m| pkt.len() <= m);
+                    if fits && d.conn.send_datagram(Bytes::from(pkt)).is_ok() {
+                        shared.traffic.down.fetch_add(data.len() as u64, Ordering::Relaxed);
+                        continue;
+                    }
+                }
+                let Some(frame) = encode_udp_frame(&src, &data) else { continue };
+                if send.write_all(&frame).await.is_err() || send.flush().await.is_err() {
+                    break;
+                }
+                shared.traffic.down.fetch_add(data.len() as u64, Ordering::Relaxed);
             }
         }
     }

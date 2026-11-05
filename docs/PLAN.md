@@ -120,9 +120,10 @@ Client apps
   outbound firewall block for 2000::/3 (both undone after, crash-safe).
   UDP is relayed too: SOCKS5 UDP ASSOCIATE on the client, framed datagrams
   on a stream (QUIC or TLS/TCP), host relays from its own socket and only
-  accepts replies from peers the device contacted. Datagrams ride a reliable
-  stream, so under packet loss they can arrive late rather than be dropped;
-  QUIC datagrams would be better for real-time traffic later. A signed
+  accepts replies from peers the device contacted. Over QUIC, packets go as
+  QUIC datagrams (tagged with an association id) when they fit, so a lost
+  packet doesn't delay the rest; larger packets and the TCP fallback use
+  stream frames. A signed
   privileged helper (SMAppService / Windows service) would remove the
   per-connect password prompt. Hardening done: on macOS the helper keeps
   tproxy-config's restore file in root-only `/var/run/homelink-tun` and never

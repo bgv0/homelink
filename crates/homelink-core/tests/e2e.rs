@@ -351,7 +351,7 @@ async fn udp_echo_server() -> SocketAddr {
     let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let addr = s.local_addr().unwrap();
     tokio::spawn(async move {
-        let mut buf = [0u8; 2048];
+        let mut buf = vec![0u8; 65_536];
         loop {
             let (n, from) = s.recv_from(&mut buf).await.unwrap();
             let _ = s.send_to(&buf[..n], from).await;
@@ -422,4 +422,38 @@ async fn udp_through_tcp_fallback() {
 async fn udp_to_local_network_is_dropped() {
     let env = setup(false).await;
     udp_roundtrip(env.paired_client().await, false).await;
+}
+
+#[tokio::test]
+async fn udp_uses_quic_datagrams_when_they_fit() {
+    use homelink_core::proto::{encode_udp_frame, read_udp_frame};
+    let env = setup(true).await;
+    let client = env.paired_client().await;
+    let echo = udp_echo_server().await;
+    let mut t = client.open_udp().await.unwrap();
+    let d = t.datagrams.as_mut().expect("QUIC gives a datagram path");
+
+    assert!(d.send(&Target::Addr(echo), b"small"), "small packet fits a datagram");
+    let (src, payload) = tokio::time::timeout(Duration::from_secs(3), d.recv()).await.unwrap().unwrap();
+    assert_eq!((src, payload), (Target::Addr(echo), b"small".to_vec()));
+
+    // Too big for one QUIC datagram: goes as a stream frame both ways.
+    let big = vec![7u8; 3000];
+    assert!(!d.send(&Target::Addr(echo), &big));
+    t.w.write_all(&encode_udp_frame(&Target::Addr(echo), &big).unwrap()).await.unwrap();
+    t.w.flush().await.unwrap();
+    let (src, payload) = tokio::time::timeout(Duration::from_secs(3), read_udp_frame(&mut t.r))
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(src, Target::Addr(echo));
+    assert_eq!(payload.len(), 3000);
+}
+
+#[tokio::test]
+async fn udp_over_tcp_has_no_datagram_path() {
+    let env = setup(true).await;
+    let client = tcp_client(&env).await;
+    assert!(client.open_udp().await.unwrap().datagrams.is_none());
 }

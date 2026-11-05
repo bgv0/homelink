@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tracing::debug;
 
-use crate::client::{Client, ClientError};
+use crate::client::{Client, ClientError, UdpDatagrams, UdpTunnel};
 use crate::splice::splice;
 
 const REPLY_OK: u8 = 0;
@@ -74,7 +74,7 @@ async fn handle(mut sock: TcpStream, client: Arc<Client>) -> Result<()> {
         },
         Command::UdpAssociate => {
             let udp = UdpSocket::bind(SocketAddr::new(sock.local_addr()?.ip(), 0)).await?;
-            let (w, r) = match client.open_udp().await {
+            let tunnel = match client.open_udp().await {
                 Ok(s) => s,
                 Err(e) => {
                     debug!("socks udp: {e}");
@@ -83,7 +83,7 @@ async fn handle(mut sock: TcpStream, client: Arc<Client>) -> Result<()> {
                 }
             };
             sock.write_all(&reply_with(REPLY_OK, udp.local_addr()?)).await?;
-            udp_associate(sock, udp, w, r, &client).await;
+            udp_associate(sock, udp, tunnel, &client).await;
         }
     }
     Ok(())
@@ -91,13 +91,8 @@ async fn handle(mut sock: TcpStream, client: Arc<Client>) -> Result<()> {
 
 /// Relay between the app's UDP socket (SOCKS5 UDP request format) and the
 /// host's UDP stream. Ends when the app closes its TCP control connection.
-async fn udp_associate(
-    mut control: TcpStream,
-    udp: UdpSocket,
-    mut w: crate::client::BoxWrite,
-    mut r: crate::client::BoxRead,
-    client: &Client,
-) {
+async fn udp_associate(mut control: TcpStream, udp: UdpSocket, tunnel: UdpTunnel, client: &Client) {
+    let UdpTunnel { mut w, mut r, mut datagrams } = tunnel;
     let mut app: Option<SocketAddr> = None;
     let mut buf = vec![0u8; 65_536];
     let mut ctl = [0u8; 64];
@@ -116,23 +111,46 @@ async fn udp_associate(
                 let Ok((target, used)) = parse_target(&buf[3..n]) else { continue };
                 if target.port() == 0 { continue }
                 let payload = &buf[3 + used..n];
-                let Some(frame) = encode_udp_frame(&target, payload) else { continue };
-                if w.write_all(&frame).await.is_err() || w.flush().await.is_err() { break }
+                let sent_as_datagram = datagrams.as_ref().is_some_and(|d| d.send(&target, payload));
+                if !sent_as_datagram {
+                    let Some(frame) = encode_udp_frame(&target, payload) else { continue };
+                    if w.write_all(&frame).await.is_err() || w.flush().await.is_err() { break }
+                }
                 client.traffic.up.fetch_add(payload.len() as u64, Ordering::Relaxed);
+            }
+            d = recv_datagram(&mut datagrams) => {
+                let Some((src, payload)) = d else { continue };
+                let Some(app) = app else { continue };
+                send_to_app(&udp, app, &src, &payload, client).await;
             }
             frame = read_udp_frame(&mut r) => {
                 let Ok(Some((src, payload))) = frame else { break };
                 let Some(app) = app else { continue };
-                let mut out = vec![0, 0, 0];
-                encode_target(&mut out, &src);
-                out.extend_from_slice(&payload);
-                if udp.send_to(&out, app).await.is_ok() {
-                    client.traffic.down.fetch_add(payload.len() as u64, Ordering::Relaxed);
-                }
+                send_to_app(&udp, app, &src, &payload, client).await;
             }
         }
     }
     let _ = w.shutdown().await;
+}
+
+/// Next QUIC datagram, or pending forever when datagrams aren't in use.
+async fn recv_datagram(d: &mut Option<UdpDatagrams>) -> Option<(Target, Vec<u8>)> {
+    let Some(dg) = d.as_mut() else { return std::future::pending().await };
+    let got = dg.recv().await;
+    if got.is_none() {
+        *d = None; // connection gone; the stream path keeps working until it ends
+    }
+    got
+}
+
+/// Wrap a datagram in the SOCKS5 UDP header and send it to the app.
+async fn send_to_app(udp: &UdpSocket, app: SocketAddr, src: &Target, payload: &[u8], client: &Client) {
+    let mut out = vec![0, 0, 0];
+    encode_target(&mut out, src);
+    out.extend_from_slice(payload);
+    if udp.send_to(&out, app).await.is_ok() {
+        client.traffic.down.fetch_add(payload.len() as u64, Ordering::Relaxed);
+    }
 }
 
 fn reply(code: u8) -> [u8; 10] {

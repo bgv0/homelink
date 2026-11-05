@@ -9,7 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use homelink_proto::{close, sanitize_name, short_id, Invite, Request, Status, Target, SERVER_NAME};
+use std::collections::HashMap;
+
+use bytes::Bytes;
+use homelink_proto::{
+    close, encode_udp_datagram, parse_udp_datagram, sanitize_name, short_id, Invite, Request, Status, Target,
+    SERVER_NAME,
+};
+use tokio::sync::mpsc;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -169,6 +176,65 @@ async fn tcp_request(
     Ok((status, Box::new(w), Box::new(r)))
 }
 
+type Routes = Arc<Mutex<HashMap<u32, mpsc::Sender<Bytes>>>>;
+
+/// QUIC datagram path for one UDP relay. Removed from the routing table
+/// when dropped.
+pub struct UdpDatagrams {
+    conn: quinn::Connection,
+    assoc: u32,
+    rx: mpsc::Receiver<Bytes>,
+    routes: Routes,
+}
+
+impl UdpDatagrams {
+    /// Send as a QUIC datagram. Returns false if it doesn't fit (or the
+    /// connection is gone), in which case send it as a stream frame.
+    pub fn send(&self, addr: &Target, payload: &[u8]) -> bool {
+        let pkt = encode_udp_datagram(self.assoc, addr, payload);
+        self.conn.max_datagram_size().is_some_and(|m| pkt.len() <= m)
+            && self.conn.send_datagram(Bytes::from(pkt)).is_ok()
+    }
+
+    /// Next datagram from the host: (source address, payload). None when the
+    /// connection is gone.
+    pub async fn recv(&mut self) -> Option<(Target, Vec<u8>)> {
+        loop {
+            let b = self.rx.recv().await?;
+            if let Ok((_, src, payload)) = parse_udp_datagram(&b) {
+                return Some((src, payload.to_vec()));
+            }
+        }
+    }
+}
+
+impl Drop for UdpDatagrams {
+    fn drop(&mut self) {
+        self.routes.lock().unwrap().remove(&self.assoc);
+    }
+}
+
+/// A UDP relay through the host: stream frames always work; QUIC datagrams
+/// are used when available.
+pub struct UdpTunnel {
+    pub w: BoxWrite,
+    pub r: BoxRead,
+    pub datagrams: Option<UdpDatagrams>,
+}
+
+async fn dispatch_datagrams(conn: quinn::Connection, routes: Routes) {
+    while let Ok(b) = conn.read_datagram().await {
+        if b.len() < 4 {
+            continue;
+        }
+        let assoc = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        let tx = routes.lock().unwrap().get(&assoc).cloned();
+        if let Some(tx) = tx {
+            let _ = tx.try_send(b);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum Transport {
     Quic,
@@ -187,6 +253,7 @@ pub struct Client {
     force_tcp: bool,
     /// Last TCP connect time, as a stand-in for round-trip time (ms).
     tcp_rtt_ms: AtomicU64,
+    routes: Routes,
 }
 
 impl Client {
@@ -202,6 +269,7 @@ impl Client {
             tcp_since: Mutex::new(None),
             force_tcp: false,
             tcp_rtt_ms: AtomicU64::new(0),
+            routes: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -237,6 +305,7 @@ impl Client {
         }
         let sa = resolve(&self.host.addr, self.host.port).await?;
         let c = dial_quic(&self.endpoint, &self.cfg, sa).await?;
+        tokio::spawn(dispatch_datagrams(c.clone(), self.routes.clone()));
         *self.tcp_since.lock().unwrap() = None;
         *guard = Some(c.clone());
         Ok(c)
@@ -277,16 +346,30 @@ impl Client {
         self.open_request(&Request::Connect(target.clone())).await
     }
 
-    /// Open a UDP relay through the host. The stream carries UDP frames
-    /// (see [`homelink_proto::encode_udp_frame`]).
-    pub async fn open_udp(&self) -> Result<(BoxWrite, BoxRead), ClientError> {
-        self.open_request(&Request::Udp).await
+    /// Open a UDP relay through the host.
+    pub async fn open_udp(&self) -> Result<UdpTunnel, ClientError> {
+        let assoc = u32::from_be_bytes(crate::random_bytes());
+        let req = Request::Udp { assoc };
+        if !self.on_tcp() {
+            match self.open_quic(&req).await {
+                Ok((conn, send, recv)) => {
+                    let (tx, rx) = mpsc::channel(256);
+                    self.routes.lock().unwrap().insert(assoc, tx);
+                    let datagrams = UdpDatagrams { conn, assoc, rx, routes: self.routes.clone() };
+                    return Ok(UdpTunnel { w: Box::new(send), r: Box::new(recv), datagrams: Some(datagrams) });
+                }
+                Err(ClientError::Timeout(_)) => self.switch_to_tcp(),
+                Err(e) => return Err(e),
+            }
+        }
+        let (w, r) = self.open_tcp(&req).await?;
+        Ok(UdpTunnel { w, r, datagrams: None })
     }
 
     async fn open_request(&self, req: &Request) -> Result<(BoxWrite, BoxRead), ClientError> {
         if !self.on_tcp() {
             match self.open_quic(req).await {
-                Ok((s, r)) => return Ok((Box::new(s), Box::new(r))),
+                Ok((_, s, r)) => return Ok((Box::new(s), Box::new(r))),
                 Err(ClientError::Timeout(_)) => self.switch_to_tcp(),
                 Err(e) => return Err(e),
             }
@@ -297,12 +380,12 @@ impl Client {
     async fn open_quic(
         &self,
         req: &Request,
-    ) -> Result<(quinn::SendStream, quinn::RecvStream), ClientError> {
+    ) -> Result<(quinn::Connection, quinn::SendStream, quinn::RecvStream), ClientError> {
         let mut last = None;
         for _ in 0..2 {
             let conn = self.quic().await?;
             match open_on(&conn, req).await {
-                Ok(s) => return Ok(s),
+                Ok((s, r)) => return Ok((conn, s, r)),
                 // The connection may have just died: retry once on a fresh one.
                 Err(e @ (ClientError::Connection(_) | ClientError::Timeout(_))) => {
                     conn.close(0u32.into(), b"retry");

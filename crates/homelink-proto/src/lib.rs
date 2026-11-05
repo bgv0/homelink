@@ -79,8 +79,9 @@ impl fmt::Display for Target {
 pub enum Request {
     Connect(Target),
     Pair { secret: Secret, name: String },
-    /// Relay UDP datagrams; the stream then carries UDP frames.
-    Udp,
+    /// Relay UDP datagrams; the stream then carries UDP frames. Over QUIC,
+    /// datagrams tagged with `assoc` may also be used (see [`encode_udp_datagram`]).
+    Udp { assoc: u32 },
 }
 
 /// Append an address in wire form (same layout as SOCKS5 addresses).
@@ -150,6 +151,26 @@ pub fn encode_udp_frame(addr: &Target, payload: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// A UDP datagram sent as a QUIC datagram: `[u32 assoc][address][payload]`.
+pub fn encode_udp_datagram(assoc: u32, addr: &Target, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(payload.len() + 24);
+    out.extend_from_slice(&assoc.to_be_bytes());
+    encode_target(&mut out, addr);
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Split a QUIC datagram into association id, address and payload.
+pub fn parse_udp_datagram(b: &[u8]) -> Result<(u32, Target, &[u8]), ProtoError> {
+    let id = b.get(..4).ok_or(ProtoError::Malformed("short datagram"))?;
+    let assoc = u32::from_be_bytes([id[0], id[1], id[2], id[3]]);
+    let (addr, used) = parse_target(&b[4..])?;
+    if addr.port() == 0 {
+        return Err(ProtoError::Malformed("port 0"));
+    }
+    Ok((assoc, addr, &b[4 + used..]))
+}
+
 /// Read one UDP frame. `Ok(None)` at a clean end of stream.
 pub async fn read_udp_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<(Target, Vec<u8>)>, ProtoError> {
     let mut lenb = [0u8; 2];
@@ -179,7 +200,10 @@ impl Request {
                 out.push(KIND_CONNECT);
                 encode_target(&mut out, target);
             }
-            Request::Udp => out.push(KIND_UDP),
+            Request::Udp { assoc } => {
+                out.push(KIND_UDP);
+                out.extend_from_slice(&assoc.to_be_bytes());
+            }
             Request::Pair { secret, name } => {
                 out.push(KIND_PAIR);
                 out.extend_from_slice(secret);
@@ -245,7 +269,7 @@ impl Request {
                 }
                 Ok(Request::Pair { secret, name })
             }
-            KIND_UDP => Ok(Request::Udp),
+            KIND_UDP => Ok(Request::Udp { assoc: r.read_u32().await? }),
             _ => Err(ProtoError::Malformed("unknown request kind")),
         }
     }
@@ -420,7 +444,7 @@ mod tests {
         roundtrip(Request::Connect(Target::Addr("[2001:db8::1]:80".parse().unwrap()))).await;
         roundtrip(Request::Connect(Target::Domain("example.com".into(), 443))).await;
         roundtrip(Request::Pair { secret: [7; 32], name: "Bob's Mac".into() }).await;
-        roundtrip(Request::Udp).await;
+        roundtrip(Request::Udp { assoc: 0xdead_beef }).await;
     }
 
     #[tokio::test]
@@ -445,6 +469,10 @@ mod tests {
         // Truncated body and bad address are errors, not panics.
         assert!(read_udp_frame(&mut &[0u8, 5, 1, 1][..]).await.is_err());
         assert!(read_udp_frame(&mut &[0u8, 1, 9][..]).await.is_err());
+
+        let d = encode_udp_datagram(7, &targets[2], b"rt");
+        assert_eq!(parse_udp_datagram(&d).unwrap(), (7, targets[2].clone(), &b"rt"[..]));
+        assert!(parse_udp_datagram(&[0, 0]).is_err());
     }
 
     #[tokio::test]
