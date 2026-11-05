@@ -16,9 +16,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use homelink_proto::{close, short_id, DeviceId, Request, Status, Target};
+use std::collections::HashSet;
+
+use homelink_proto::{close, encode_udp_frame, read_udp_frame, short_id, DeviceId, Request, Status, Target};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{broadcast, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -42,6 +44,10 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
+/// A UDP relay with no traffic either way for this long is closed.
+const UDP_IDLE: Duration = Duration::from_secs(120);
+/// Remote peers one UDP relay remembers (replies from others are dropped).
+const UDP_MAX_PEERS: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct PairRequest {
@@ -379,7 +385,7 @@ async fn handle_tcp(
                 decide_pairing(id, &secret, name, &shared).await?
             }
             Request::Pair { .. } => Status::Denied,
-            Request::Connect(_) => Status::NotPaired,
+            Request::Connect(_) | Request::Udp => Status::NotPaired,
         };
         reply(&mut w, status).await?;
         let _ = w.shutdown().await;
@@ -432,6 +438,11 @@ where
             let _ = reply(&mut send, Status::Ok).await;
             let _ = send.shutdown().await;
         }
+        Request::Udp => {
+            if reply(&mut send, Status::Ok).await.is_ok() {
+                udp_relay(recv, send, &shared).await;
+            }
+        }
         Request::Connect(target) => match open_target(&target, &shared.opts).await {
             Ok(tcp) => {
                 if reply(&mut send, Status::Ok).await.is_ok() {
@@ -445,6 +456,78 @@ where
             }
         },
     }
+}
+
+fn allowed(ip: IpAddr, opts: &HostOptions) -> bool {
+    opts.allow_lan || !(is_local(ip) || opts.blocked.contains(&ip))
+}
+
+async fn recv_opt(sock: &Option<UdpSocket>, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+    match sock {
+        Some(s) => s.recv_from(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Relay UDP datagrams between a device and the internet. Destinations get
+/// the same local-network rules as TCP; replies are only accepted from
+/// addresses the device has sent to.
+async fn udp_relay<R, W>(mut recv: R, mut send: W, shared: &Shared)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let Ok(v4) = UdpSocket::bind("0.0.0.0:0").await else { return };
+    let v6 = UdpSocket::bind("[::]:0").await.ok();
+    let mut peers: HashSet<SocketAddr> = HashSet::new();
+    let mut dns: HashMap<String, Option<IpAddr>> = HashMap::new();
+    let mut buf4 = vec![0u8; 65_536];
+    let mut buf6 = vec![0u8; 65_536];
+    loop {
+        tokio::select! {
+            frame = timeout(UDP_IDLE, read_udp_frame(&mut recv)) => {
+                let Ok(Ok(Some((target, payload)))) = frame else { break };
+                let dest = match &target {
+                    Target::Addr(a) => Some(*a),
+                    Target::Domain(d, port) => {
+                        if !dns.contains_key(d) && dns.len() < 1024 {
+                            let ip = match timeout(DIAL_TIMEOUT, tokio::net::lookup_host((d.as_str(), *port))).await {
+                                Ok(Ok(mut it)) => it.find(|a| a.is_ipv4()).map(|a| a.ip()),
+                                _ => None,
+                            };
+                            dns.insert(d.clone(), ip);
+                        }
+                        dns.get(d).copied().flatten().map(|ip| SocketAddr::new(ip, *port))
+                    }
+                };
+                let Some(dest) = dest.filter(|d| allowed(d.ip(), &shared.opts)) else { continue };
+                let sock = if dest.is_ipv4() { Some(&v4) } else { v6.as_ref() };
+                if let Some(sock) = sock {
+                    if sock.send_to(&payload, dest).await.is_ok() {
+                        shared.traffic.up.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                        if peers.len() < UDP_MAX_PEERS {
+                            peers.insert(dest);
+                        }
+                    }
+                }
+            }
+            r = v4.recv_from(&mut buf4) => {
+                let Ok((n, from)) = r else { continue };
+                if !peers.contains(&from) { continue }
+                let Some(frame) = encode_udp_frame(&Target::Addr(from), &buf4[..n]) else { continue };
+                if send.write_all(&frame).await.is_err() || send.flush().await.is_err() { break }
+                shared.traffic.down.fetch_add(n as u64, Ordering::Relaxed);
+            }
+            r = recv_opt(&v6, &mut buf6) => {
+                let Ok((n, from)) = r else { continue };
+                if !peers.contains(&from) { continue }
+                let Some(frame) = encode_udp_frame(&Target::Addr(from), &buf6[..n]) else { continue };
+                if send.write_all(&frame).await.is_err() || send.flush().await.is_err() { break }
+                shared.traffic.down.fetch_add(n as u64, Ordering::Relaxed);
+            }
+        }
+    }
+    let _ = send.shutdown().await;
 }
 
 /// Resolve and connect, refusing local-network destinations unless allowed.
@@ -463,7 +546,7 @@ pub(crate) async fn open_target(target: &Target, opts: &HostOptions) -> Result<T
     }
     let allowed: Vec<SocketAddr> = addrs
         .into_iter()
-        .filter(|a| opts.allow_lan || !(is_local(a.ip()) || opts.blocked.contains(&a.ip())))
+        .filter(|a| allowed(a.ip(), opts))
         .collect();
     if allowed.is_empty() {
         return Err(Status::Blocked);

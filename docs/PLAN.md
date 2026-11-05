@@ -118,7 +118,11 @@ Client apps
   cover a killed helper. Wintun is bundled on Windows. IPv6 can't bypass the
   tunnel: macOS turns it off on "Automatic" services, Windows adds a temporary
   outbound firewall block for 2000::/3 (both undone after, crash-safe).
-  Known gap: UDP (other than DNS) is dropped. A signed
+  UDP is relayed too: SOCKS5 UDP ASSOCIATE on the client, framed datagrams
+  on a stream (QUIC or TLS/TCP), host relays from its own socket and only
+  accepts replies from peers the device contacted. Datagrams ride a reliable
+  stream, so under packet loss they can arrive late rather than be dropped;
+  QUIC datagrams would be better for real-time traffic later. A signed
   privileged helper (SMAppService / Windows service) would remove the
   per-connect password prompt. Hardening done: on macOS the helper keeps
   tproxy-config's restore file in root-only `/var/run/homelink-tun` and never
@@ -161,8 +165,7 @@ Tray / menu bar icon plus one small window with two tabs:
 
 ### Not in v1
 
-UDP proxying (QUIC/HTTP3 and games fall back to TCP), IPv6 egress, TCP fallback
-transport, relays, mobile apps, Linux (the core should stay portable, but no
+IPv6 egress, relays, mobile apps, Linux (the core should stay portable, but no
 packaging), split tunnelling.
 
 ---

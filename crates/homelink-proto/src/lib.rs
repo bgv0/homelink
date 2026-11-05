@@ -1,8 +1,10 @@
 //! Wire format shared by the homelink host and client.
 //!
-//! Every QUIC bidirectional stream starts with one [`Request`] from the client,
-//! answered by one [`Status`] byte from the host. After `Status::Ok` on a
-//! connect request, the stream carries raw TCP bytes in both directions.
+//! Every QUIC bidirectional stream (or TLS-over-TCP connection) starts with
+//! one [`Request`] from the client, answered by one [`Status`] byte from the
+//! host. After `Status::Ok`:
+//! - a connect request carries raw TCP bytes in both directions;
+//! - a UDP request carries UDP datagrams as frames (see [`encode_udp_frame`]).
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -19,6 +21,9 @@ pub const MAX_NAME_LEN: usize = 64;
 
 const KIND_CONNECT: u8 = 1;
 const KIND_PAIR: u8 = 2;
+const KIND_UDP: u8 = 3;
+/// Largest UDP payload carried in one frame.
+pub const MAX_UDP_PAYLOAD: usize = 65_507;
 const ATYP_V4: u8 = 1;
 const ATYP_DOMAIN: u8 = 3;
 const ATYP_V6: u8 = 4;
@@ -74,6 +79,94 @@ impl fmt::Display for Target {
 pub enum Request {
     Connect(Target),
     Pair { secret: Secret, name: String },
+    /// Relay UDP datagrams; the stream then carries UDP frames.
+    Udp,
+}
+
+/// Append an address in wire form (same layout as SOCKS5 addresses).
+pub fn encode_target(out: &mut Vec<u8>, target: &Target) {
+    match target {
+        Target::Addr(SocketAddr::V4(a)) => {
+            out.push(ATYP_V4);
+            out.extend_from_slice(&a.ip().octets());
+        }
+        Target::Addr(SocketAddr::V6(a)) => {
+            out.push(ATYP_V6);
+            out.extend_from_slice(&a.ip().octets());
+        }
+        Target::Domain(d, _) => {
+            out.push(ATYP_DOMAIN);
+            out.push(d.len() as u8);
+            out.extend_from_slice(d.as_bytes());
+        }
+    }
+    out.extend_from_slice(&target.port().to_be_bytes());
+}
+
+/// Parse an address from the start of `b`; returns it and the bytes used.
+pub fn parse_target(b: &[u8]) -> Result<(Target, usize), ProtoError> {
+    let short = ProtoError::Malformed("truncated address");
+    let atyp = *b.first().ok_or(short)?;
+    let (target, used) = match atyp {
+        ATYP_V4 => {
+            let a: [u8; 4] = b.get(1..5).ok_or(ProtoError::Malformed("truncated address"))?.try_into().unwrap();
+            let p = b.get(5..7).ok_or(ProtoError::Malformed("truncated address"))?;
+            (Target::Addr(SocketAddr::new(Ipv4Addr::from(a).into(), u16::from_be_bytes([p[0], p[1]]))), 7)
+        }
+        ATYP_V6 => {
+            let a: [u8; 16] = b.get(1..17).ok_or(ProtoError::Malformed("truncated address"))?.try_into().unwrap();
+            let p = b.get(17..19).ok_or(ProtoError::Malformed("truncated address"))?;
+            (Target::Addr(SocketAddr::new(Ipv6Addr::from(a).into(), u16::from_be_bytes([p[0], p[1]]))), 19)
+        }
+        ATYP_DOMAIN => {
+            let len = *b.get(1).ok_or(ProtoError::Malformed("truncated address"))? as usize;
+            let d = b.get(2..2 + len).ok_or(ProtoError::Malformed("truncated address"))?;
+            let d = std::str::from_utf8(d).map_err(|_| ProtoError::Malformed("domain not utf-8"))?;
+            if !valid_domain(d) {
+                return Err(ProtoError::Malformed("invalid domain"));
+            }
+            let p = b.get(2 + len..4 + len).ok_or(ProtoError::Malformed("truncated address"))?;
+            (Target::Domain(d.to_string(), u16::from_be_bytes([p[0], p[1]])), 4 + len)
+        }
+        _ => return Err(ProtoError::Malformed("unknown address type")),
+    };
+    Ok((target, used))
+}
+
+/// One UDP datagram on a UDP stream: `[u16 length][address][payload]`, where
+/// the address is the destination (client to host) or the source (host to
+/// client). Returns None if the payload is too large.
+pub fn encode_udp_frame(addr: &Target, payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.len() > MAX_UDP_PAYLOAD {
+        return None;
+    }
+    let mut body = Vec::with_capacity(payload.len() + 24);
+    encode_target(&mut body, addr);
+    body.extend_from_slice(payload);
+    let len = u16::try_from(body.len()).ok()?;
+    let mut out = Vec::with_capacity(body.len() + 2);
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(&body);
+    Some(out)
+}
+
+/// Read one UDP frame. `Ok(None)` at a clean end of stream.
+pub async fn read_udp_frame<R: AsyncRead + Unpin>(r: &mut R) -> Result<Option<(Target, Vec<u8>)>, ProtoError> {
+    let mut lenb = [0u8; 2];
+    match r.read_exact(&mut lenb).await {
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(e.into()),
+    }
+    let len = u16::from_be_bytes(lenb) as usize;
+    let mut body = vec![0u8; len];
+    r.read_exact(&mut body).await?;
+    let (addr, used) = parse_target(&body)?;
+    if addr.port() == 0 {
+        return Err(ProtoError::Malformed("port 0"));
+    }
+    body.drain(..used);
+    Ok(Some((addr, body)))
 }
 
 impl Request {
@@ -84,23 +177,9 @@ impl Request {
         match self {
             Request::Connect(target) => {
                 out.push(KIND_CONNECT);
-                match target {
-                    Target::Addr(SocketAddr::V4(a)) => {
-                        out.push(ATYP_V4);
-                        out.extend_from_slice(&a.ip().octets());
-                    }
-                    Target::Addr(SocketAddr::V6(a)) => {
-                        out.push(ATYP_V6);
-                        out.extend_from_slice(&a.ip().octets());
-                    }
-                    Target::Domain(d, _) => {
-                        out.push(ATYP_DOMAIN);
-                        out.push(d.len() as u8);
-                        out.extend_from_slice(d.as_bytes());
-                    }
-                }
-                out.extend_from_slice(&target.port().to_be_bytes());
+                encode_target(&mut out, target);
             }
+            Request::Udp => out.push(KIND_UDP),
             Request::Pair { secret, name } => {
                 out.push(KIND_PAIR);
                 out.extend_from_slice(secret);
@@ -166,6 +245,7 @@ impl Request {
                 }
                 Ok(Request::Pair { secret, name })
             }
+            KIND_UDP => Ok(Request::Udp),
             _ => Err(ProtoError::Malformed("unknown request kind")),
         }
     }
@@ -340,6 +420,31 @@ mod tests {
         roundtrip(Request::Connect(Target::Addr("[2001:db8::1]:80".parse().unwrap()))).await;
         roundtrip(Request::Connect(Target::Domain("example.com".into(), 443))).await;
         roundtrip(Request::Pair { secret: [7; 32], name: "Bob's Mac".into() }).await;
+        roundtrip(Request::Udp).await;
+    }
+
+    #[tokio::test]
+    async fn udp_frames_roundtrip() {
+        let targets = [
+            Target::Addr("1.2.3.4:53".parse().unwrap()),
+            Target::Addr("[2001:db8::1]:443".parse().unwrap()),
+            Target::Domain("example.com".into(), 3478),
+        ];
+        let mut wire = Vec::new();
+        for t in &targets {
+            wire.extend(encode_udp_frame(t, b"hello").unwrap());
+        }
+        wire.extend(encode_udp_frame(&targets[0], &[]).unwrap());
+        let mut r = &wire[..];
+        for t in &targets {
+            assert_eq!(read_udp_frame(&mut r).await.unwrap(), Some((t.clone(), b"hello".to_vec())));
+        }
+        assert_eq!(read_udp_frame(&mut r).await.unwrap(), Some((targets[0].clone(), vec![])));
+        assert_eq!(read_udp_frame(&mut r).await.unwrap(), None, "clean end");
+        assert!(encode_udp_frame(&targets[0], &vec![0; MAX_UDP_PAYLOAD + 1]).is_none());
+        // Truncated body and bad address are errors, not panics.
+        assert!(read_udp_frame(&mut &[0u8, 5, 1, 1][..]).await.is_err());
+        assert!(read_udp_frame(&mut &[0u8, 1, 9][..]).await.is_err());
     }
 
     #[tokio::test]

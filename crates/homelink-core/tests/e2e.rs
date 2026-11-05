@@ -342,3 +342,84 @@ async fn falls_back_to_tcp_when_udp_is_blocked() {
     let echo = echo_server().await;
     echo_roundtrip(&client, echo, 50_000).await;
 }
+
+// ---------------------------------------------------------------------------
+// UDP (SOCKS5 UDP ASSOCIATE)
+// ---------------------------------------------------------------------------
+
+async fn udp_echo_server() -> SocketAddr {
+    let s = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = s.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (n, from) = s.recv_from(&mut buf).await.unwrap();
+            let _ = s.send_to(&buf[..n], from).await;
+        }
+    });
+    addr
+}
+
+/// Open a SOCKS5 UDP association; returns the control socket (keep it open)
+/// and the relay address to send datagrams to.
+async fn socks_udp_associate(socks: SocketAddr) -> (TcpStream, SocketAddr) {
+    let mut s = TcpStream::connect(socks).await.unwrap();
+    s.write_all(&[5, 1, 0]).await.unwrap();
+    let mut b2 = [0u8; 2];
+    s.read_exact(&mut b2).await.unwrap();
+    s.write_all(&[5, 3, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+    let mut rep = [0u8; 10];
+    s.read_exact(&mut rep).await.unwrap();
+    assert_eq!(rep[1], 0, "UDP associate accepted");
+    let relay = SocketAddr::new(
+        std::net::Ipv4Addr::new(rep[4], rep[5], rep[6], rep[7]).into(),
+        u16::from_be_bytes([rep[8], rep[9]]),
+    );
+    (s, relay)
+}
+
+fn socks_udp_packet(dest: SocketAddr, payload: &[u8]) -> Vec<u8> {
+    let mut p = vec![0, 0, 0];
+    homelink_core::proto::encode_target(&mut p, &Target::Addr(dest));
+    p.extend_from_slice(payload);
+    p
+}
+
+async fn udp_roundtrip(client: Client, allow: bool) {
+    let client = Arc::new(client);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socks_addr = listener.local_addr().unwrap();
+    tokio::spawn(socks::serve(client, listener));
+
+    let echo = udp_echo_server().await;
+    let (_control, relay) = socks_udp_associate(socks_addr).await;
+    let app = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    app.send_to(&socks_udp_packet(echo, b"ping over udp"), relay).await.unwrap();
+    let mut buf = [0u8; 2048];
+    let got = tokio::time::timeout(Duration::from_secs(3), app.recv_from(&mut buf)).await;
+    if allow {
+        let (n, _) = got.expect("echo reply").unwrap();
+        let expected = socks_udp_packet(echo, b"ping over udp");
+        assert_eq!(&buf[..n], &expected[..], "reply carries the source address");
+    } else {
+        assert!(got.is_err(), "local-network UDP must be dropped");
+    }
+}
+
+#[tokio::test]
+async fn udp_through_quic() {
+    let env = setup(true).await;
+    udp_roundtrip(env.paired_client().await, true).await;
+}
+
+#[tokio::test]
+async fn udp_through_tcp_fallback() {
+    let env = setup(true).await;
+    udp_roundtrip(tcp_client(&env).await, true).await;
+}
+
+#[tokio::test]
+async fn udp_to_local_network_is_dropped() {
+    let env = setup(false).await;
+    udp_roundtrip(env.paired_client().await, false).await;
+}

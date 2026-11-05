@@ -274,24 +274,34 @@ impl Client {
 
     /// Open a proxied TCP connection to `target` through the host.
     pub async fn open(&self, target: &Target) -> Result<(BoxWrite, BoxRead), ClientError> {
+        self.open_request(&Request::Connect(target.clone())).await
+    }
+
+    /// Open a UDP relay through the host. The stream carries UDP frames
+    /// (see [`homelink_proto::encode_udp_frame`]).
+    pub async fn open_udp(&self) -> Result<(BoxWrite, BoxRead), ClientError> {
+        self.open_request(&Request::Udp).await
+    }
+
+    async fn open_request(&self, req: &Request) -> Result<(BoxWrite, BoxRead), ClientError> {
         if !self.on_tcp() {
-            match self.open_quic(target).await {
+            match self.open_quic(req).await {
                 Ok((s, r)) => return Ok((Box::new(s), Box::new(r))),
                 Err(ClientError::Timeout(_)) => self.switch_to_tcp(),
                 Err(e) => return Err(e),
             }
         }
-        self.open_tcp(target).await
+        self.open_tcp(req).await
     }
 
     async fn open_quic(
         &self,
-        target: &Target,
+        req: &Request,
     ) -> Result<(quinn::SendStream, quinn::RecvStream), ClientError> {
         let mut last = None;
         for _ in 0..2 {
             let conn = self.quic().await?;
-            match open_on(&conn, target).await {
+            match open_on(&conn, req).await {
                 Ok(s) => return Ok(s),
                 // The connection may have just died: retry once on a fresh one.
                 Err(e @ (ClientError::Connection(_) | ClientError::Timeout(_))) => {
@@ -309,11 +319,10 @@ impl Client {
         })
     }
 
-    async fn open_tcp(&self, target: &Target) -> Result<(BoxWrite, BoxRead), ClientError> {
+    async fn open_tcp(&self, req: &Request) -> Result<(BoxWrite, BoxRead), ClientError> {
         let sa = resolve(&self.host.addr, self.host.port).await?;
         let start = Instant::now();
-        let (status, w, r) =
-            tcp_request(&self.tcp, sa, &Request::Connect(target.clone()), Duration::from_secs(15)).await?;
+        let (status, w, r) = tcp_request(&self.tcp, sa, req, Duration::from_secs(15)).await?;
         self.tcp_rtt_ms.store((start.elapsed().as_millis() as u64 / 3).max(1), Ordering::Relaxed);
         match status {
             Status::Ok => Ok((w, r)),
@@ -332,10 +341,10 @@ impl Client {
 
 async fn open_on(
     conn: &quinn::Connection,
-    target: &Target,
+    req: &Request,
 ) -> Result<(quinn::SendStream, quinn::RecvStream), ClientError> {
     let (mut send, mut recv) = conn.open_bi().await?;
-    send.write_all(&Request::Connect(target.clone()).encode()).await?;
+    send.write_all(&req.encode()).await?;
     let mut b = [0u8; 1];
     // The host answers after dialing, which can take up to its own timeout.
     match timeout(Duration::from_secs(15), recv.read_exact(&mut b)).await {

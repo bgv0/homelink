@@ -1,13 +1,15 @@
-//! Local SOCKS5 server (CONNECT only, no auth). Bind it to 127.0.0.1 only.
+//! Local SOCKS5 server (no auth): CONNECT and UDP ASSOCIATE.
+//! Bind it to 127.0.0.1 only.
 
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Result};
-use homelink_proto::{valid_domain, Status, Target};
+use homelink_proto::{encode_target, encode_udp_frame, parse_target, read_udp_frame, valid_domain, Status, Target};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::time::timeout;
 use tracing::debug;
 
@@ -20,6 +22,14 @@ const REPLY_NOT_ALLOWED: u8 = 2;
 const REPLY_HOST_UNREACHABLE: u8 = 4;
 const REPLY_CMD_UNSUPPORTED: u8 = 7;
 const REPLY_ATYP_UNSUPPORTED: u8 = 8;
+
+const CMD_CONNECT: u8 = 1;
+const CMD_UDP_ASSOCIATE: u8 = 3;
+
+enum Command {
+    Connect(Target),
+    UdpAssociate,
+}
 
 pub async fn serve(client: Arc<Client>, listener: TcpListener) -> Result<()> {
     loop {
@@ -41,31 +51,106 @@ pub async fn serve(client: Arc<Client>, listener: TcpListener) -> Result<()> {
     }
 }
 
+fn error_code(e: &ClientError) -> u8 {
+    match e {
+        ClientError::Status(Status::Blocked) | ClientError::NotPaired => REPLY_NOT_ALLOWED,
+        ClientError::Status(Status::Unreachable) => REPLY_HOST_UNREACHABLE,
+        _ => REPLY_GENERAL,
+    }
+}
+
 async fn handle(mut sock: TcpStream, client: Arc<Client>) -> Result<()> {
-    let target = timeout(Duration::from_secs(10), handshake(&mut sock)).await??;
-    match client.open(&target).await {
-        Ok((send, recv)) => {
-            sock.write_all(&reply(REPLY_OK)).await?;
-            splice(recv, send, sock, &client.traffic, false).await;
-        }
-        Err(e) => {
-            debug!("socks: {target}: {e}");
-            let code = match e {
-                ClientError::Status(Status::Blocked) | ClientError::NotPaired => REPLY_NOT_ALLOWED,
-                ClientError::Status(Status::Unreachable) => REPLY_HOST_UNREACHABLE,
-                _ => REPLY_GENERAL,
+    let cmd = timeout(Duration::from_secs(10), handshake(&mut sock)).await??;
+    match cmd {
+        Command::Connect(target) => match client.open(&target).await {
+            Ok((send, recv)) => {
+                sock.write_all(&reply(REPLY_OK)).await?;
+                splice(recv, send, sock, &client.traffic, false).await;
+            }
+            Err(e) => {
+                debug!("socks: {target}: {e}");
+                sock.write_all(&reply(error_code(&e))).await?;
+            }
+        },
+        Command::UdpAssociate => {
+            let udp = UdpSocket::bind(SocketAddr::new(sock.local_addr()?.ip(), 0)).await?;
+            let (w, r) = match client.open_udp().await {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("socks udp: {e}");
+                    sock.write_all(&reply(error_code(&e))).await?;
+                    return Ok(());
+                }
             };
-            sock.write_all(&reply(code)).await?;
+            sock.write_all(&reply_with(REPLY_OK, udp.local_addr()?)).await?;
+            udp_associate(sock, udp, w, r, &client).await;
         }
     }
     Ok(())
+}
+
+/// Relay between the app's UDP socket (SOCKS5 UDP request format) and the
+/// host's UDP stream. Ends when the app closes its TCP control connection.
+async fn udp_associate(
+    mut control: TcpStream,
+    udp: UdpSocket,
+    mut w: crate::client::BoxWrite,
+    mut r: crate::client::BoxRead,
+    client: &Client,
+) {
+    let mut app: Option<SocketAddr> = None;
+    let mut buf = vec![0u8; 65_536];
+    let mut ctl = [0u8; 64];
+    loop {
+        tokio::select! {
+            n = control.read(&mut ctl) => {
+                if !matches!(n, Ok(n) if n > 0) { break }
+            }
+            got = udp.recv_from(&mut buf) => {
+                let Ok((n, from)) = got else { continue };
+                // Only the local app that opened this association may use it.
+                if !from.ip().is_loopback() || app.is_some_and(|a| a != from) { continue }
+                app = Some(from);
+                // RSV(2) FRAG(1) ADDR PORT DATA; fragments aren't supported.
+                if n < 4 || buf[2] != 0 { continue }
+                let Ok((target, used)) = parse_target(&buf[3..n]) else { continue };
+                if target.port() == 0 { continue }
+                let payload = &buf[3 + used..n];
+                let Some(frame) = encode_udp_frame(&target, payload) else { continue };
+                if w.write_all(&frame).await.is_err() || w.flush().await.is_err() { break }
+                client.traffic.up.fetch_add(payload.len() as u64, Ordering::Relaxed);
+            }
+            frame = read_udp_frame(&mut r) => {
+                let Ok(Some((src, payload))) = frame else { break };
+                let Some(app) = app else { continue };
+                let mut out = vec![0, 0, 0];
+                encode_target(&mut out, &src);
+                out.extend_from_slice(&payload);
+                if udp.send_to(&out, app).await.is_ok() {
+                    client.traffic.down.fetch_add(payload.len() as u64, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+    let _ = w.shutdown().await;
 }
 
 fn reply(code: u8) -> [u8; 10] {
     [5, code, 0, 1, 0, 0, 0, 0, 0, 0]
 }
 
-async fn handshake(s: &mut TcpStream) -> Result<Target> {
+fn reply_with(code: u8, bound: SocketAddr) -> Vec<u8> {
+    let mut out = vec![5, code, 0];
+    let bound = match bound.ip() {
+        // Some clients can't use an unspecified address; tell them loopback.
+        IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::new(Ipv4Addr::LOCALHOST.into(), bound.port()),
+        _ => bound,
+    };
+    encode_target(&mut out, &Target::Addr(bound));
+    out
+}
+
+async fn handshake(s: &mut TcpStream) -> Result<Command> {
     if s.read_u8().await? != 5 {
         bail!("not SOCKS5");
     }
@@ -83,9 +168,10 @@ async fn handshake(s: &mut TcpStream) -> Result<Target> {
     if h[0] != 5 {
         bail!("bad request version");
     }
-    if h[1] != 1 {
+    let cmd = h[1];
+    if cmd != CMD_CONNECT && cmd != CMD_UDP_ASSOCIATE {
         s.write_all(&reply(REPLY_CMD_UNSUPPORTED)).await?;
-        bail!("only CONNECT is supported");
+        bail!("unsupported SOCKS command {cmd}");
     }
     let target = match h[3] {
         1 => {
@@ -120,9 +206,13 @@ async fn handshake(s: &mut TcpStream) -> Result<Target> {
             bail!("unknown address type");
         }
     };
+    if cmd == CMD_UDP_ASSOCIATE {
+        // The address is only a hint of where the app will send from.
+        return Ok(Command::UdpAssociate);
+    }
     if target.port() == 0 {
         s.write_all(&reply(REPLY_GENERAL)).await?;
         bail!("port 0");
     }
-    Ok(target)
+    Ok(Command::Connect(target))
 }
