@@ -39,6 +39,15 @@ but it **hasn't been tried on real networks yet**. See [the plan](docs/PLAN.md).
 - If your internet stops working after homelink crashed in full-tunnel mode,
   use **Connect → Trouble? → Repair network settings**.
 
+## Installing preview builds
+
+Preview builds aren't signed by Apple or Microsoft yet, so the system warns:
+
+- **macOS**: open the `.dmg`, drag homelink to Applications, open it once,
+  then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+- **Windows**: if SmartScreen appears, click **More info → Run anyway**. The
+  installer asks for admin rights once (to add the firewall rule).
+
 ## Using the app
 
 1. On the host: **Share → Start sharing**. Check the router line says the port
