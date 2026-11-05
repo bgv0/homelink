@@ -228,3 +228,117 @@ async fn known_device_can_reuse_new_invite_to_update_address() {
     assert_eq!((h.addr.as_str(), h.port), ("localhost", 4000));
     assert!(env.client_store.update_host_address("home", "bad host!", 1).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// TLS-over-TCP fallback
+// ---------------------------------------------------------------------------
+
+async fn tcp_client(env: &Env) -> Client {
+    let identity = env.client_store.identity().unwrap();
+    let saved = client::pair_tcp(&identity, &env.invite(600), "tcp laptop", Some("home"))
+        .await
+        .unwrap();
+    Client::new(&identity, saved).unwrap().with_tcp_only()
+}
+
+async fn echo_roundtrip(client: &Client, echo: SocketAddr, n: usize) {
+    let (mut w, mut r) = client.open(&Target::Addr(echo)).await.unwrap();
+    let payload: Vec<u8> = (0..n).map(|i| (i % 253) as u8).collect();
+    let p = payload.clone();
+    let writer = tokio::spawn(async move {
+        w.write_all(&p).await.unwrap();
+        w.flush().await.unwrap();
+        w.shutdown().await.unwrap();
+    });
+    let mut got = Vec::new();
+    r.read_to_end(&mut got).await.unwrap();
+    writer.await.unwrap();
+    assert_eq!(got, payload);
+}
+
+#[tokio::test]
+async fn tcp_pair_and_proxy() {
+    let env = setup(true).await;
+    assert!(env.host.tcp_enabled);
+    let client = tcp_client(&env).await;
+    assert_eq!(env.host_store.devices().unwrap().len(), 1);
+    let echo = echo_server().await;
+    echo_roundtrip(&client, echo, 300_000).await;
+    assert_eq!(client.transport(), client::Transport::Tcp);
+    use std::sync::atomic::Ordering::Relaxed;
+    assert_eq!(env.host.traffic.up.load(Relaxed), 300_000);
+    assert_eq!(env.host.traffic.down.load(Relaxed), 300_000);
+}
+
+#[tokio::test]
+async fn tcp_blocks_lan_and_refuses_strangers() {
+    let env = setup(false).await;
+    let client = tcp_client(&env).await;
+    let echo = echo_server().await;
+    assert!(matches!(
+        client.open(&Target::Addr(echo)).await,
+        Err(ClientError::Status(Status::Blocked))
+    ));
+
+    let stranger_dir = tempfile::tempdir().unwrap();
+    let stranger = Store::open(stranger_dir.path()).unwrap();
+    let c = Client::new(&stranger.identity().unwrap(), client.host.clone()).unwrap().with_tcp_only();
+    match c.open(&Target::Domain("example.com".into(), 80)).await {
+        Err(ClientError::NotPaired) => {}
+        other => panic!("expected NotPaired, got {:?}", other.map(|_| ())),
+    }
+}
+
+#[tokio::test]
+async fn tcp_revoke_cuts_live_connection() {
+    let env = setup(true).await;
+    let client = tcp_client(&env).await;
+    let echo = echo_server().await;
+    let (mut w, mut r) = client.open(&Target::Addr(echo)).await.unwrap();
+    w.write_all(b"hi").await.unwrap();
+    w.flush().await.unwrap();
+    let mut b = [0u8; 2];
+    r.read_exact(&mut b).await.unwrap();
+    assert_eq!(env.host.online().len(), 1);
+
+    let id = env.host_store.devices().unwrap()[0].id.clone();
+    env.host_store.revoke(&id[..8]).unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(env.host.online().is_empty());
+    let mut rest = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(2), r.read_to_end(&mut rest)).await;
+    assert!(matches!(
+        client.open(&Target::Addr(echo)).await,
+        Err(ClientError::NotPaired)
+    ));
+}
+
+/// Simulates a network that blocks UDP: the client is pointed at a port
+/// where only a TCP relay to the host listens, so QUIC times out.
+#[tokio::test]
+async fn falls_back_to_tcp_when_udp_is_blocked() {
+    let env = setup(true).await;
+    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_port = relay.local_addr().unwrap().port();
+    let host_tcp = env.host.local_addr;
+    tokio::spawn(async move {
+        loop {
+            let (mut inbound, _) = relay.accept().await.unwrap();
+            tokio::spawn(async move {
+                let mut out = TcpStream::connect(host_tcp).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+            });
+        }
+    });
+
+    let identity = env.client_store.identity().unwrap();
+    let mut inv = env.invite(600);
+    inv.port = relay_port;
+    let saved = client::pair(&identity, &inv, "laptop", Some("home")).await.unwrap();
+    assert_eq!(env.host_store.devices().unwrap().len(), 1, "paired over TCP");
+
+    let client = Client::new(&identity, saved).unwrap();
+    assert_eq!(client.check().await.unwrap(), client::Transport::Tcp);
+    let echo = echo_server().await;
+    echo_roundtrip(&client, echo, 50_000).await;
+}

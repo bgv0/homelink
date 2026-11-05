@@ -5,8 +5,9 @@ a direct, encrypted connection. One app for **macOS and Windows**: either
 computer can **Share** (host) or **Connect** (client).
 
 ```text
-Client apps → system proxy or TUN → local SOCKS5 → QUIC, direct and encrypted
-           → host's forwarded UDP port → host → internet
+Client apps → system proxy or TUN → local SOCKS5
+           → QUIC (or TLS over TCP if UDP is blocked), direct and encrypted
+           → host's forwarded port → host → internet
 ```
 
 - No accounts, no relays, no servers in between. The client talks straight to
@@ -22,10 +23,13 @@ but it **hasn't been tried on real networks yet**. See [the plan](docs/PLAN.md).
 
 ## Requirements
 
-- The host needs a public IPv4 address and port forwarding (UDP 47420 by
-  default). homelink tries UPnP to forward the port automatically. **CGNAT
+- The host needs a public IPv4 address and port forwarding (UDP and TCP 47420
+  by default). homelink tries UPnP / NAT-PMP to forward them automatically. **CGNAT
   connections can't host**; use *Network check* in the app to find out.
-- Networks that block UDP (some schools, hotels, offices) can't connect yet.
+- Clients use QUIC (UDP) and switch to TLS over TCP automatically on networks
+  that block UDP (some schools, hotels, offices). TCP is a little slower to
+  open each connection. Networks that only allow ports 80/443 still need the
+  host's forwarded port to be one of those.
 - Speed is limited by the host's upload bandwidth.
 - Firewalls: the Windows installer adds an inbound UDP rule for homelink. On
   macOS, if the firewall is on, allow incoming connections when asked.
@@ -51,7 +55,7 @@ Preview builds aren't signed by Apple or Microsoft yet, so the system warns:
 ## Using the app
 
 1. On the host: **Share → Start sharing**. Check the router line says the port
-   is forwarded (or forward UDP 47420 to the computer by hand).
+   is forwarded (or forward UDP and TCP 47420 to the computer by hand).
 2. **Invite a device**, copy the code, and send it to the other device.
 3. On the other device: **Connect → Add a host**, paste the code. Approve it on
    the host.

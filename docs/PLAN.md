@@ -5,7 +5,8 @@ Written 2026-11-05.
 **Status (2026-11-05):** built but not yet tested on real networks. Done:
 protocol, core engine, CLI, desktop app (system-proxy mode), CI on macOS and
 Windows, a release workflow for unsigned installers, and full-tunnel mode via
-an elevated helper. Not done: signing, and every manual network test in the
+an elevated helper, NAT-PMP fallback for port mapping, and a TLS-over-TCP
+transport fallback for UDP-blocked networks. Not done: signing, and every manual network test in the
 gates below. Automated
 loopback tests pass.
 
@@ -37,8 +38,8 @@ Read this whole file before acting, including section 6 (operating rules).
 - **CGNAT**: hosts behind carrier-grade NAT cannot be reached by port forwarding.
   The app should detect this and say so clearly. Testing needs a host with a
   public IPv4 (Phase 0).
-- **UDP-blocking client networks** (some schools, hotels, offices): QUIC won't
-  connect. v1 accepts this. A TCP fallback is a later option (section 5).
+- **UDP-blocking client networks** (some schools, hotels, offices): handled by
+  the TLS-over-TCP fallback on the same port number (built).
 - Speed is capped by the host's **upload** bandwidth.
 - Changing home IPs: handled by a DDNS hostname or by re-sharing the invite
   (section 2, "Finding the host").
@@ -290,8 +291,6 @@ security warnings (or only the documented SmartScreen one if unsigned on Windows
 
 ## 5. Later (after v1)
 
-- TCP fallback transport (TLS over TCP on the same forwarded port number) for
-  UDP-blocking networks.
 - Mainline-DHT address publishing so IP changes don't need a DDNS hostname or a new invite.
 - UDP proxying, IPv6 egress, Linux packages, mobile clients, macOS Network Extension.
 

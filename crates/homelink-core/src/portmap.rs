@@ -1,4 +1,6 @@
 //! Automatic port forwarding (UPnP-IGD, then NAT-PMP), kept alive in the background.
+//! UDP is required (QUIC); TCP (the fallback transport) is mapped when the
+//! router allows it.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
@@ -53,6 +55,14 @@ async fn map_once(gw: &Gateway<Tokio>, port: u16) -> Result<Option<IpAddr>, Stri
             .await
             .map_err(|e| format!("router refused the port mapping ({e})"))?;
     }
+    // TCP fallback on the same port; not fatal if refused.
+    if gw
+        .add_port(PortMappingProtocol::TCP, port, local, LEASE.as_secs() as u32, DESCRIPTION)
+        .await
+        .is_err()
+    {
+        let _ = gw.add_port(PortMappingProtocol::TCP, port, local, 0, DESCRIPTION).await;
+    }
     Ok(gw.get_external_ip().await.ok())
 }
 
@@ -66,9 +76,11 @@ impl Mapping {
         match self {
             Mapping::Upnp(gw) => {
                 let _ = gw.remove_port(PortMappingProtocol::UDP, port).await;
+                let _ = gw.remove_port(PortMappingProtocol::TCP, port).await;
             }
             Mapping::NatPmp(gw) => {
                 let _ = natpmp::map_udp(*gw, port, 0).await;
+                let _ = natpmp::map_tcp(*gw, port, 0).await;
             }
         }
     }
@@ -87,6 +99,7 @@ async fn try_map(port: u16) -> Result<(Mapping, Option<IpAddr>, Duration), Strin
     let Some(gw) = natpmp::default_gateway() else { return Err(upnp_err) };
     match natpmp::map_udp(gw, port, LEASE.as_secs() as u32).await {
         Ok(m) if m.external_port == port => {
+            let _ = natpmp::map_tcp(gw, port, LEASE.as_secs() as u32).await;
             let ip = natpmp::external_ip(gw).await.map(IpAddr::V4);
             let renew = Duration::from_secs((u64::from(m.lifetime) / 2).max(60));
             Ok((Mapping::NatPmp(gw), ip, renew))

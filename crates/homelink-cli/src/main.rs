@@ -204,11 +204,15 @@ async fn run(cli: Cli) -> Result<()> {
             }
             let saved = store.find_host(host.as_deref())?;
             let client = Arc::new(Client::new(&store.identity()?, saved)?);
-            client.connection().await?;
+            let transport = client.check().await?;
             let listener = tokio::net::TcpListener::bind(socks_addr)
                 .await
                 .with_context(|| format!("couldn't listen on {socks_addr}"))?;
-            println!("Connected to {}. SOCKS5 proxy on {socks_addr} (Ctrl-C to stop).", client.host.name);
+            let via = match transport {
+                client::Transport::Quic => "",
+                client::Transport::Tcp => " over TCP (UDP seems blocked here)",
+            };
+            println!("Connected to {}{via}. SOCKS5 proxy on {socks_addr} (Ctrl-C to stop).", client.host.name);
             tokio::select! {
                 r = socks::serve(client.clone(), listener) => r?,
                 _ = tokio::signal::ctrl_c() => {}
@@ -263,7 +267,12 @@ async fn run_host(store: Store, s: HostSettings) -> Result<()> {
         });
     }
     let id = store.identity()?.id;
-    println!("Sharing on UDP port {} (device {}).", handle.local_addr.port(), short_id(&id));
+    println!(
+        "Sharing on port {} ({}) (device {}).",
+        handle.local_addr.port(),
+        if handle.tcp_enabled { "UDP + TCP" } else { "UDP only: TCP port in use" },
+        short_id(&id)
+    );
     match (&s.public_addr, public) {
         (Some(a), _) => println!("Invites will point to {a}:{}.", s.port),
         (None, Some(ip)) => println!(
@@ -285,7 +294,7 @@ async fn run_host(store: Store, s: HostSettings) -> Result<()> {
                     MapState::Trying => continue,
                     MapState::Mapped { .. } => "Router: port forwarded automatically.".to_string(),
                     MapState::Unavailable(e) => format!(
-                        "Router: {e}. Forward UDP {port} to {} on your router by hand.",
+                        "Router: {e}. Forward UDP and TCP {port} to {} on your router by hand.",
                         portmap::lan_ip().map(|i| i.to_string()).unwrap_or_else(|| "this computer".into())
                     ),
                 };
@@ -293,7 +302,7 @@ async fn run_host(store: Store, s: HostSettings) -> Result<()> {
             }
         });
     } else {
-        println!("Forward UDP {} to this computer on your router.", s.port);
+        println!("Forward UDP and TCP {} to this computer on your router.", s.port);
     }
 
     let mut events = handle.subscribe();

@@ -186,6 +186,8 @@ pub enum Status {
     Expired = 5,
     /// Host user declined the pairing.
     Rejected = 6,
+    /// This device isn't paired with the host (or was removed).
+    NotPaired = 7,
 }
 
 impl Status {
@@ -198,6 +200,7 @@ impl Status {
             4 => Status::BadRequest,
             5 => Status::Expired,
             6 => Status::Rejected,
+            7 => Status::NotPaired,
             _ => return None,
         })
     }
@@ -211,6 +214,7 @@ impl Status {
             Status::BadRequest => "the host did not understand the request",
             Status::Expired => "the invite code has expired, ask for a new one",
             Status::Rejected => "the host declined the request",
+            Status::NotPaired => "the host doesn't know this device (never paired, or it was removed)",
         }
     }
 }

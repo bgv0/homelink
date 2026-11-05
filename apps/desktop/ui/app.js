@@ -102,7 +102,7 @@ function render() {
   $("share-toggle").closest(".hero").classList.toggle("on", !!s);
   $("share-status").hidden = !s;
   if (s) {
-    $("share-address").textContent = s.address ? `${s.address} : ${s.port} (UDP)` : `Unknown (UDP port ${s.port})`;
+    $("share-address").textContent = s.address ? `${s.address} : ${s.port} (UDP + TCP)` : `Unknown (port ${s.port})`;
     const r = $("share-router");
     r.textContent = s.router;
     r.className = s.router_ok === true ? "ok" : s.router_ok === false ? "warn" : "";
@@ -153,6 +153,7 @@ function render() {
   $("conn-sub").textContent = c
     ? [
         c.rtt_ms != null ? `Ping ${c.rtt_ms} ms` : null,
+        c.transport === "Tcp" ? "via TCP (UDP blocked here)" : null,
         `↑ ${bytes(c.up)} ↓ ${bytes(c.down)}`,
         {
           system: "Apps go through the host",

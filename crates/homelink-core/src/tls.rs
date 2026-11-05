@@ -40,19 +40,19 @@ fn transport(keep_alive: bool) -> Arc<quinn::TransportConfig> {
     Arc::new(t)
 }
 
-pub fn server_config(identity: &Identity) -> Result<quinn::ServerConfig> {
+/// TLS settings for the host, used by both QUIC and the TCP fallback.
+pub fn server_tls(identity: &Identity) -> Result<rustls::ServerConfig> {
     let p = provider();
     let mut cfg = rustls::ServerConfig::builder_with_provider(p.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(AnyClientCert { provider: p }))
         .with_single_cert(vec![identity.cert.clone()], identity.key())?;
     cfg.alpn_protocols = vec![ALPN.to_vec()];
-    let mut server = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(cfg)?));
-    server.transport_config(transport(false));
-    Ok(server)
+    Ok(cfg)
 }
 
-pub fn client_config(identity: &Identity, host_id: DeviceId) -> Result<quinn::ClientConfig> {
+/// TLS settings for a client pinned to `host_id`.
+pub fn client_tls(identity: &Identity, host_id: DeviceId) -> Result<rustls::ClientConfig> {
     let p = provider();
     let mut cfg = rustls::ClientConfig::builder_with_provider(p.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
@@ -60,19 +60,38 @@ pub fn client_config(identity: &Identity, host_id: DeviceId) -> Result<quinn::Cl
         .with_custom_certificate_verifier(Arc::new(PinnedHost { provider: p, host_id }))
         .with_client_auth_cert(vec![identity.cert.clone()], identity.key())?;
     cfg.alpn_protocols = vec![ALPN.to_vec()];
+    Ok(cfg)
+}
+
+pub fn server_config(identity: &Identity) -> Result<quinn::ServerConfig> {
+    let cfg = server_tls(identity)?;
+    let mut server = quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(cfg)?));
+    server.transport_config(transport(false));
+    Ok(server)
+}
+
+pub fn client_config(identity: &Identity, host_id: DeviceId) -> Result<quinn::ClientConfig> {
+    let cfg = client_tls(identity, host_id)?;
     let mut client = quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(cfg)?));
     client.transport_config(transport(true));
     Ok(client)
 }
 
-/// Device ID of the remote side of an established connection.
+/// Device ID from a peer's certificate chain.
+pub fn peer_id_from_certs(certs: Option<&[CertificateDer<'_>]>) -> Result<DeviceId> {
+    let cert = certs
+        .and_then(|c| c.first())
+        .ok_or_else(|| anyhow!("peer sent no certificate"))?;
+    Ok(device_id(cert))
+}
+
+/// Device ID of the remote side of an established QUIC connection.
 pub fn peer_id(conn: &quinn::Connection) -> Result<DeviceId> {
     let any = conn.peer_identity().ok_or_else(|| anyhow!("peer sent no certificate"))?;
     let certs = any
         .downcast::<Vec<CertificateDer<'static>>>()
         .map_err(|_| anyhow!("unexpected peer identity type"))?;
-    let cert = certs.first().ok_or_else(|| anyhow!("peer sent no certificate"))?;
-    Ok(device_id(cert))
+    peer_id_from_certs(Some(&certs))
 }
 
 #[derive(Debug)]

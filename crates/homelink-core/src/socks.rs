@@ -46,7 +46,7 @@ async fn handle(mut sock: TcpStream, client: Arc<Client>) -> Result<()> {
     match client.open(&target).await {
         Ok((send, recv)) => {
             sock.write_all(&reply(REPLY_OK)).await?;
-            splice(send, recv, sock, &client.traffic, false).await;
+            splice(recv, send, sock, &client.traffic, false).await;
         }
         Err(e) => {
             debug!("socks: {target}: {e}");

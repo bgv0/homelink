@@ -96,6 +96,8 @@ struct ConnectionView {
     host: String,
     socks: String,
     mode: Mode,
+    /// "QUIC" or "TCP" (TCP when UDP is blocked).
+    transport: client::Transport,
     tunnel_error: Option<String>,
     connected: bool,
     rtt_ms: Option<u64>,
@@ -136,11 +138,11 @@ async fn overview(app: AppHandle, state: Shared<'_>) -> Res<Overview> {
         .collect();
     let sharing = host.as_ref().map(|h| {
         let (router, router_ok) = match &h.mapper {
-            None => ("Automatic forwarding is off: forward the port on your router.".to_string(), None),
+            None => ("Automatic forwarding is off: forward UDP and TCP on your router.".to_string(), None),
             Some(m) => match &*m.state.borrow() {
                 MapState::Trying => ("Asking your router to forward the port...".to_string(), None),
                 MapState::Mapped { .. } => ("Port forwarded automatically by your router.".to_string(), Some(true)),
-                MapState::Unavailable(e) => (format!("{e}. Forward the port on your router by hand."), Some(false)),
+                MapState::Unavailable(e) => (format!("{e}. Forward UDP and TCP {} on your router by hand.", h.port), Some(false)),
             },
         };
         let now_ip = h.ip_watch.current();
@@ -163,6 +165,7 @@ async fn overview(app: AppHandle, state: Shared<'_>) -> Res<Overview> {
                 host: c.client.host.name.clone(),
                 socks: c.socks.to_string(),
                 mode: c.mode,
+                transport: c.client.transport(),
                 tunnel_error: c.tunnel.as_ref().and_then(|t| t.failed()),
                 connected: rtt.is_some(),
                 rtt_ms: rtt.map(|d| d.as_millis() as u64),
@@ -347,7 +350,7 @@ async fn connect(state: Shared<'_>, name: String, mode: Mode) -> Res<()> {
         saved.addr = host_ip.to_string();
     }
     let client = Arc::new(Client::new(&state.store.identity().map_err(err)?, saved).map_err(err)?);
-    client.connection().await.map_err(err)?;
+    client.check().await.map_err(err)?;
     let listener = match tokio::net::TcpListener::bind(PREFERRED_SOCKS).await {
         Ok(l) => l,
         Err(_) => tokio::net::TcpListener::bind("127.0.0.1:0").await.map_err(err)?,

@@ -1,19 +1,28 @@
-//! Host role: accept QUIC connections from paired devices and open outbound
-//! TCP connections on their behalf. Needs no admin rights.
+//! Host role: accept connections from paired devices and open outbound TCP
+//! connections on their behalf. Needs no admin rights.
+//!
+//! Two transports on the same port number:
+//! - QUIC over UDP (preferred): one connection per device, one stream per
+//!   proxied TCP connection.
+//! - TLS over TCP (fallback for networks that block UDP): one TLS connection
+//!   per proxied TCP connection. Same certificates, pairing and allowlist.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use homelink_proto::{close, short_id, DeviceId, Request, Status, Target};
-use tokio::net::TcpStream;
-use tokio::sync::{broadcast, OwnedSemaphorePermit, Semaphore};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{broadcast, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tokio_rustls::TlsAcceptor;
 use tracing::{debug, info, warn};
 
 use crate::netfilter::is_local;
@@ -24,6 +33,8 @@ use crate::tls;
 /// Handshakes (and pairing attempts) from not-yet-known peers handled at once.
 const MAX_PENDING_HANDSHAKES: usize = 32;
 const MAX_CONNECTIONS_PER_DEVICE: usize = 8;
+/// TLS-over-TCP connections open at once (each carries one proxied connection).
+const MAX_TCP_CONNECTIONS: usize = 1024;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -81,6 +92,12 @@ struct LiveConn {
     conn: quinn::Connection,
 }
 
+struct LiveTcp {
+    id: DeviceId,
+    name: String,
+    stop: Arc<Notify>,
+}
+
 struct Shared {
     store: Store,
     opts: HostOptions,
@@ -88,17 +105,31 @@ struct Shared {
     events: broadcast::Sender<HostEvent>,
     traffic: Arc<Traffic>,
     live: Mutex<HashMap<usize, LiveConn>>,
+    live_tcp: Mutex<HashMap<u64, LiveTcp>>,
+    next_tcp: AtomicU64,
     handshakes: Arc<Semaphore>,
+    tcp_slots: Arc<Semaphore>,
 }
 
 impl Shared {
     fn emit(&self, e: HostEvent) {
         let _ = self.events.send(e);
     }
+
+    fn known_device(&self, id: &DeviceId) -> Result<Option<String>> {
+        Ok(self
+            .store
+            .devices()?
+            .into_iter()
+            .find(|d| d.device_id().as_ref() == Some(id))
+            .map(|d| d.name))
+    }
 }
 
 pub struct HostHandle {
     pub local_addr: SocketAddr,
+    /// Whether the TCP fallback listener is running (false if the TCP port was taken).
+    pub tcp_enabled: bool,
     pub traffic: Arc<Traffic>,
     endpoint: quinn::Endpoint,
     shared: Arc<Shared>,
@@ -112,8 +143,11 @@ impl HostHandle {
 
     /// Devices with at least one live connection: (id, name).
     pub fn online(&self) -> Vec<(DeviceId, String)> {
-        let live = self.shared.live.lock().unwrap();
-        let mut v: Vec<_> = live.values().map(|l| (l.id, l.name.clone())).collect();
+        let mut v: Vec<_> = {
+            let live = self.shared.live.lock().unwrap();
+            live.values().map(|l| (l.id, l.name.clone())).collect()
+        };
+        v.extend(self.shared.live_tcp.lock().unwrap().values().map(|l| (l.id, l.name.clone())));
         v.sort();
         v.dedup();
         v
@@ -124,15 +158,29 @@ impl HostHandle {
         for t in &self.tasks {
             t.abort();
         }
+        for l in self.shared.live_tcp.lock().unwrap().values() {
+            l.stop.notify_one();
+        }
         let _ = timeout(Duration::from_secs(2), self.endpoint.wait_idle()).await;
     }
 }
 
 pub async fn start(store: Store, opts: HostOptions, approver: Approver) -> Result<HostHandle> {
     let identity = store.identity()?;
-    let endpoint = quinn::Endpoint::server(tls::server_config(&identity)?, opts.bind)
-        .with_context(|| format!("could not open UDP port {}, is something else using it?", opts.bind.port()))?;
+    let endpoint = quinn::Endpoint::server(tls::server_config(&identity)?, opts.bind).with_context(|| {
+        format!("could not open UDP port {}, is something else using it?", opts.bind.port())
+    })?;
     let local_addr = endpoint.local_addr()?;
+    // TCP fallback on the same port number. Not fatal if it's taken.
+    let tcp = match TcpListener::bind(local_addr).await {
+        Ok(l) => Some(l),
+        Err(e) => {
+            warn!("TCP fallback disabled: couldn't open TCP port {}: {e}", local_addr.port());
+            None
+        }
+    };
+    let acceptor = TlsAcceptor::from(Arc::new(tls::server_tls(&identity)?));
+
     let (events, _) = broadcast::channel(64);
     let traffic = Arc::new(Traffic::default());
     let shared = Arc::new(Shared {
@@ -142,14 +190,56 @@ pub async fn start(store: Store, opts: HostOptions, approver: Approver) -> Resul
         events,
         traffic: traffic.clone(),
         live: Mutex::new(HashMap::new()),
+        live_tcp: Mutex::new(HashMap::new()),
+        next_tcp: AtomicU64::new(1),
         handshakes: Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES)),
+        tcp_slots: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
     });
     info!("host listening on {local_addr}, device {}", short_id(&identity.id));
 
-    let accept = tokio::spawn(accept_loop(endpoint.clone(), shared.clone()));
-    let watcher = tokio::spawn(revoke_watcher(shared.clone()));
-    Ok(HostHandle { local_addr, traffic, endpoint, shared, tasks: vec![accept, watcher] })
+    let mut tasks = vec![
+        tokio::spawn(accept_loop(endpoint.clone(), shared.clone())),
+        tokio::spawn(revoke_watcher(shared.clone())),
+    ];
+    let tcp_enabled = tcp.is_some();
+    if let Some(listener) = tcp {
+        tasks.push(tokio::spawn(tcp_accept_loop(listener, acceptor, shared.clone())));
+    }
+    Ok(HostHandle { local_addr, tcp_enabled, traffic, endpoint, shared, tasks })
 }
+
+// ---------------------------------------------------------------------------
+// Pairing (shared by both transports)
+// ---------------------------------------------------------------------------
+
+async fn decide_pairing(id: DeviceId, secret: &[u8; 32], name: String, shared: &Shared) -> Result<Status> {
+    Ok(match shared.store.take_invite(secret) {
+        Ok(_) => {
+            let approved = !shared.opts.require_approval
+                || timeout(APPROVAL_TIMEOUT, (shared.approver)(PairRequest { id, name: name.clone() }))
+                    .await
+                    .unwrap_or(false);
+            if approved {
+                shared.store.add_device(&id, &name)?;
+                info!("paired {name} ({})", short_id(&id));
+                shared.emit(HostEvent::Paired { id, name });
+                Status::Ok
+            } else {
+                shared.emit(HostEvent::PairDeclined { name });
+                Status::Rejected
+            }
+        }
+        Err(InviteLookup::Expired) => Status::Expired,
+        Err(InviteLookup::Unknown) => {
+            warn!("pairing attempt with an unknown invite code");
+            Status::Denied
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// QUIC
+// ---------------------------------------------------------------------------
 
 async fn accept_loop(endpoint: quinn::Endpoint, shared: Arc<Shared>) {
     while let Some(incoming) = endpoint.accept().await {
@@ -173,16 +263,15 @@ async fn handle_connection(
 ) -> Result<()> {
     let conn = timeout(HANDSHAKE_TIMEOUT, incoming.accept()?).await??;
     let id = tls::peer_id(&conn)?;
-    let known = shared.store.devices()?.into_iter().find(|d| d.device_id() == Some(id));
-    match known {
-        Some(device) => {
+    match shared.known_device(&id)? {
+        Some(name) => {
             drop(permit);
             let count = shared.live.lock().unwrap().values().filter(|l| l.id == id).count();
             if count >= MAX_CONNECTIONS_PER_DEVICE {
                 conn.close(close::TOO_MANY.into(), b"too many connections");
                 return Ok(());
             }
-            serve_device(conn, id, device.name, shared).await;
+            serve_device(conn, id, name, shared).await;
         }
         None => {
             pair_unknown(conn, id, &shared).await?;
@@ -203,28 +292,7 @@ async fn pair_unknown(conn: quinn::Connection, id: DeviceId, shared: &Shared) ->
         conn.close(close::NOT_PAIRED.into(), b"not paired");
         return Ok(());
     };
-    let status = match shared.store.take_invite(&secret) {
-        Ok(_) => {
-            let approved = !shared.opts.require_approval
-                || timeout(APPROVAL_TIMEOUT, (shared.approver)(PairRequest { id, name: name.clone() }))
-                    .await
-                    .unwrap_or(false);
-            if approved {
-                shared.store.add_device(&id, &name)?;
-                info!("paired {name} ({})", short_id(&id));
-                shared.emit(HostEvent::Paired { id, name });
-                Status::Ok
-            } else {
-                shared.emit(HostEvent::PairDeclined { name });
-                Status::Rejected
-            }
-        }
-        Err(InviteLookup::Expired) => Status::Expired,
-        Err(InviteLookup::Unknown) => {
-            warn!("pairing attempt with an unknown invite code");
-            Status::Denied
-        }
-    };
+    let status = decide_pairing(id, &secret, name, shared).await?;
     send.write_all(&[status as u8]).await?;
     let _ = send.finish();
     // Give the client time to read the answer; it closes the connection itself.
@@ -245,38 +313,114 @@ async fn serve_device(conn: quinn::Connection, id: DeviceId, name: String, share
 
     while let Ok((send, recv)) = conn.accept_bi().await {
         let shared = shared.clone();
-        tokio::spawn(handle_stream(send, recv, shared));
+        tokio::spawn(serve_request(recv, send, shared));
     }
 
     shared.live.lock().unwrap().remove(&key);
     shared.emit(HostEvent::Disconnected { id, name });
 }
 
-async fn handle_stream(mut send: quinn::SendStream, mut recv: quinn::RecvStream, shared: Arc<Shared>) {
+// ---------------------------------------------------------------------------
+// TLS over TCP
+// ---------------------------------------------------------------------------
+
+async fn tcp_accept_loop(listener: TcpListener, acceptor: TlsAcceptor, shared: Arc<Shared>) {
+    loop {
+        let tcp = match listener.accept().await {
+            Ok((s, _)) => s,
+            Err(e) => {
+                debug!("tcp accept: {e}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
+        let Ok(slot) = shared.tcp_slots.clone().try_acquire_owned() else { continue };
+        let acceptor = acceptor.clone();
+        let shared = shared.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_tcp(tcp, acceptor, shared).await {
+                debug!("tcp connection ended: {e:#}");
+            }
+            drop(slot);
+        });
+    }
+}
+
+async fn handle_tcp(tcp: TcpStream, acceptor: TlsAcceptor, shared: Arc<Shared>) -> Result<()> {
+    let _ = tcp.set_nodelay(true);
+    let tls = timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await??;
+    let id = tls::peer_id_from_certs(tls.get_ref().1.peer_certificates())?;
+    let (mut r, mut w) = tokio::io::split(tls);
+
+    let Some(name) = shared.known_device(&id)? else {
+        // Unknown device: only a pairing request with a live invite is accepted.
+        let Ok(_permit) = shared.handshakes.clone().try_acquire_owned() else { return Ok(()) };
+        let req = timeout(REQUEST_TIMEOUT, Request::read(&mut r)).await??;
+        let status = match req {
+            Request::Pair { secret, name } if !shared.store.invites()?.is_empty() => {
+                decide_pairing(id, &secret, name, &shared).await?
+            }
+            Request::Pair { .. } => Status::Denied,
+            Request::Connect(_) => Status::NotPaired,
+        };
+        reply(&mut w, status).await?;
+        let _ = w.shutdown().await;
+        return Ok(());
+    };
+
+    let key = shared.next_tcp.fetch_add(1, Ordering::Relaxed);
+    let stop = Arc::new(Notify::new());
+    shared
+        .live_tcp
+        .lock()
+        .unwrap()
+        .insert(key, LiveTcp { id, name, stop: stop.clone() });
+    tokio::select! {
+        _ = serve_request(r, w, shared.clone()) => {}
+        _ = stop.notified() => {}
+    }
+    shared.live_tcp.lock().unwrap().remove(&key);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// One proxied connection (both transports)
+// ---------------------------------------------------------------------------
+
+async fn reply<W: AsyncWrite + Unpin>(w: &mut W, status: Status) -> std::io::Result<()> {
+    w.write_all(&[status as u8]).await?;
+    w.flush().await
+}
+
+async fn serve_request<R, W>(mut recv: R, mut send: W, shared: Arc<Shared>)
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let req = match timeout(REQUEST_TIMEOUT, Request::read(&mut recv)).await {
         Ok(Ok(r)) => r,
         _ => {
-            let _ = send.write_all(&[Status::BadRequest as u8]).await;
-            let _ = send.finish();
+            let _ = reply(&mut send, Status::BadRequest).await;
+            let _ = send.shutdown().await;
             return;
         }
     };
     match req {
         // Already paired: re-pairing is a no-op.
         Request::Pair { .. } => {
-            let _ = send.write_all(&[Status::Ok as u8]).await;
-            let _ = send.finish();
+            let _ = reply(&mut send, Status::Ok).await;
+            let _ = send.shutdown().await;
         }
         Request::Connect(target) => match open_target(&target, &shared.opts).await {
             Ok(tcp) => {
-                if send.write_all(&[Status::Ok as u8]).await.is_ok() {
-                    splice(send, recv, tcp, &shared.traffic, true).await;
+                if reply(&mut send, Status::Ok).await.is_ok() {
+                    splice(recv, send, tcp, &shared.traffic, true).await;
                 }
             }
             Err(status) => {
                 debug!("connect to {target} failed: {}", status.describe());
-                let _ = send.write_all(&[status as u8]).await;
-                let _ = send.finish();
+                let _ = reply(&mut send, status).await;
+                let _ = send.shutdown().await;
             }
         },
     }
@@ -286,10 +430,12 @@ async fn handle_stream(mut send: quinn::SendStream, mut recv: quinn::RecvStream,
 pub(crate) async fn open_target(target: &Target, opts: &HostOptions) -> Result<TcpStream, Status> {
     let addrs: Vec<SocketAddr> = match target {
         Target::Addr(a) => vec![*a],
-        Target::Domain(d, port) => match timeout(DIAL_TIMEOUT, tokio::net::lookup_host((d.as_str(), *port))).await {
-            Ok(Ok(it)) => it.collect(),
-            _ => Vec::new(),
-        },
+        Target::Domain(d, port) => {
+            match timeout(DIAL_TIMEOUT, tokio::net::lookup_host((d.as_str(), *port))).await {
+                Ok(Ok(it)) => it.collect(),
+                _ => Vec::new(),
+            }
+        }
     };
     if addrs.is_empty() {
         return Err(Status::Unreachable);
@@ -315,13 +461,19 @@ async fn revoke_watcher(shared: Arc<Shared>) {
         tick.tick().await;
         let Ok(devices) = shared.store.devices() else { continue };
         let allowed: Vec<DeviceId> = devices.iter().filter_map(|d| d.device_id()).collect();
-        let mut live = shared.live.lock().unwrap();
-        live.retain(|_, l| {
+        shared.live.lock().unwrap().retain(|_, l| {
             if allowed.contains(&l.id) {
                 return true;
             }
             l.conn.close(close::REVOKED.into(), b"device removed");
             shared.emit(HostEvent::Revoked { id: l.id, name: l.name.clone() });
+            false
+        });
+        shared.live_tcp.lock().unwrap().retain(|_, l| {
+            if allowed.contains(&l.id) {
+                return true;
+            }
+            l.stop.notify_one();
             false
         });
     }
