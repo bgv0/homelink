@@ -109,11 +109,21 @@ address for the host computer.
 Changing the port: if 47420 is taken or you want another, set it under
 **Sharing settings → Port** on the host and forward that port instead.
 
-### 3d. Test it
+### 3d. Mac hosts: allow incoming connections
 
-Port forwarding usually can't be tested from inside the same network. After
-finishing step 5, connect from a **phone hotspot** or another network to
-confirm it works.
+If the macOS firewall is on (*System Settings → Network → Firewall*), the
+first time you click **Start sharing** macOS asks whether homelink may accept
+incoming network connections. Click **Allow**. If you missed it, add homelink
+under *Firewall → Options* and set it to *Allow incoming connections*.
+
+(Windows doesn't ask: the installer already added the firewall rules.)
+
+### 3e. Test it
+
+Test from **outside** the host's network: after finishing step 5, connect from
+a **phone hotspot** or another Wi-Fi. Many routers can't connect a device to
+their own public address from inside the same network ("hairpin NAT"), so a
+test from home can fail even when everything is set up right.
 
 ---
 
@@ -189,7 +199,20 @@ Click **Disconnect** when you're done. Your normal settings come back.
 | Some app doesn't go through the host | That app ignores the system proxy. Use **Full tunnel**. |
 | Internet doesn't work after homelink crashed | **Connect → Trouble? → Repair network settings**. |
 | Router page, printer, etc. unreachable while connected | They're on *your* network; homelink leaves local addresses alone in system-proxy mode. In full-tunnel mode, disconnect to reach them. |
+| Doesn't connect when the client is on the **same network** as the host | Your router probably doesn't support hairpin NAT. Test from another network, or on the client use **Edit** to set the host's address to its local one (e.g. `192.168.1.23`) while you're at home. |
 | Need help | **Copy diagnostics** (under *Network check* or *Trouble?*) and paste the report. IP addresses in it are partly hidden. |
+
+## Uninstalling
+
+- **macOS**: quit homelink (menu bar icon → **Quit**), then drag
+  `/Applications/homelink.app` to the Trash. To also remove pairings and
+  settings, delete `~/Library/Application Support/homelink`.
+- **Windows**: quit homelink (tray icon → **Quit**), then *Settings → Apps →
+  Installed apps → homelink → Uninstall* (this also removes its firewall
+  rules). To remove pairings and settings, delete `%APPDATA%\homelink`.
+
+Before uninstalling a host, you can remove its devices under **Share →
+Devices**; before uninstalling a client, disconnect first.
 
 ## Security notes
 

@@ -3,7 +3,8 @@ name = "homelink-desktop"
 description = "homelink desktop app for macOS and Windows"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+# GPL because tun2proxy depends on socks5-impl (GPL-3.0). See LICENSE.md.
+license = "GPL-3.0-or-later"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

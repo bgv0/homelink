@@ -47,6 +47,12 @@
     "macOS": {
       "minimumSystemVersion": "13.0",
       "signingIdentity": "-"
+    },
+    "license": "GPL-3.0-or-later",
+    "copyright": "Copyright (c) 2026 bgv0 and homelink contributors",
+    "resources": {
+      "../LICENSE": "LICENSE.txt",
+      "../../../THIRD-PARTY.md": "THIRD-PARTY.md"
     }
   }
 }

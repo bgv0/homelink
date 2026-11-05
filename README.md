@@ -94,3 +94,9 @@ docs/                   plan and research notes
 ```
 
 Never commit real credentials, invites or personal network details.
+
+## Licence
+
+Crates under `crates/` are MIT or Apache-2.0; the desktop app is
+GPL-3.0-or-later. Details in [LICENSE.md](LICENSE.md); third-party software
+in [THIRD-PARTY.md](THIRD-PARTY.md). Security reports: [SECURITY.md](SECURITY.md).

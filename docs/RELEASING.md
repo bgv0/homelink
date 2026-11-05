@@ -56,10 +56,13 @@ generate`). Keep the private key in a `TAURI_SIGNING_PRIVATE_KEY` secret, put
 the public key in `tauri.conf.json` (`plugins.updater.pubkey`), and point the
 updater at a `latest.json` on GitHub Releases.
 
-## Before making the repository public
+## Licences
 
-- Pick the licence (currently MIT OR Apache-2.0 in `Cargo.toml`). Check
-  dependency licences with `cargo deny check licenses`. Wintun's licence file
-  ships with Windows builds.
-- Scan history for secrets: `gitleaks detect`.
-- Add `SECURITY.md` with a way to report vulnerabilities.
+- `crates/` are MIT OR Apache-2.0; the desktop app is GPL-3.0-or-later
+  because tun2proxy depends on `socks5-impl` (GPL-3.0). See `LICENSE.md`.
+- After changing dependencies, run `python3 scripts/third_party.py` to
+  regenerate `THIRD-PARTY.md`, and check no new GPL/AGPL dependency reached
+  `crates/`: `cargo tree -p homelink-core -e normal | grep -i gpl` should
+  print nothing (licences aren't in the tree; check new crates on crates.io).
+- Installers include the app's licence (`LICENSE.txt`) and `THIRD-PARTY.md`;
+  Windows installers also ship `wintun-LICENSE.txt`.
