@@ -14,9 +14,9 @@ Read this whole file before acting, including section 6 (operating rules).
 
 ## 1. Why this shape
 
-- Port forwarding is the premise, so the client can dial the host directly. No
-  relay is needed, and n0's free public relays are not meant for public apps
-  anyway (hobby/dev use only, see `docs/RESEARCH.md`).
+- Port forwarding is the premise, so the client opens a **direct, encrypted
+  connection** to the host PC's forwarded port. Nothing sits in between: no
+  relay, no rendezvous server, no account.
 - The host should need **no admin rights and no OS routing changes**. So the host
   is a user-space proxy: it accepts encrypted streams and opens ordinary outbound
   TCP connections. This works the same on Mac and Windows. A classic L3 VPN
@@ -277,7 +277,6 @@ security warnings (or only the documented SmartScreen one if unsigned on Windows
 - TCP fallback transport (TLS over TCP on the same forwarded port number) for
   UDP-blocking networks.
 - Mainline-DHT address publishing so IP changes don't need a DDNS hostname or a new invite.
-- Optional self-hosted relay URL for CGNAT hosts (user runs `iroh-relay` themselves).
 - UDP proxying, IPv6 egress, Linux packages, mobile clients, macOS Network Extension.
 
 ---

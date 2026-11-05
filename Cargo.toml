@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/homelink-proto", "crates/homelink-core", "crates/homelink-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+homelink-proto = { path = "crates/homelink-proto" }
+homelink-core = { path = "crates/homelink-core" }
+anyhow = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+hex = "0.4"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rcgen = "0.13"
+ring = "0.17"
+dirs = "6"
+igd-next = { version = "0.16", features = ["aio_tokio"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"

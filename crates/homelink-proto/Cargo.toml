@@ -1,0 +1,12 @@
+[package]
+name = "homelink-proto"
+description = "Wire format and invite codes for homelink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio = { workspace = true }
+hex.workspace = true
+base64.workspace = true
