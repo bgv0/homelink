@@ -115,8 +115,10 @@ Client apps
   prompt, Windows UAC) and runs tun2proxy with `--setup --dns virtual`,
   bypassing the host IP. A heartbeat file makes the helper restore the network
   if the app dies; tproxy-config's state file plus a "Repair network" button
-  cover a killed helper. Wintun is bundled on Windows. Known gaps: macOS IPv6
-  isn't routed into the tunnel; UDP (other than DNS) is dropped. A signed
+  cover a killed helper. Wintun is bundled on Windows. IPv6 can't bypass the
+  tunnel: macOS turns it off on "Automatic" services, Windows adds a temporary
+  outbound firewall block for 2000::/3 (both undone after, crash-safe).
+  Known gap: UDP (other than DNS) is dropped. A signed
   privileged helper (SMAppService / Windows service) would remove the
   per-connect password prompt. Hardening done: on macOS the helper keeps
   tproxy-config's restore file in root-only `/var/run/homelink-tun` and never

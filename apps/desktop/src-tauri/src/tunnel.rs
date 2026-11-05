@@ -74,6 +74,98 @@ fn use_private_temp_dir() -> Result<(), String> {
 // Helper side (runs elevated)
 // ---------------------------------------------------------------------------
 
+/// tproxy-config only routes IPv4 into the tunnel (on both macOS and
+/// Windows), so IPv6 could go around it.
+///
+/// macOS: tproxy-config only routes IPv4 into the tunnel, so IPv6 traffic
+/// would go around it. While the tunnel is up, turn IPv6 off on services set
+/// to "Automatic" and turn it back on afterwards. The list of changed services
+/// lives in the root-only state folder so a crash can be undone next time.
+#[cfg(target_os = "macos")]
+mod ipv6_guard {
+    use std::process::Command;
+
+    const STATE: &str = "/var/run/homelink-tun/ipv6-off.json";
+
+    fn networksetup(args: &[&str]) -> Option<String> {
+        let out = Command::new("/usr/sbin/networksetup").args(args).output().ok()?;
+        out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn services() -> Vec<String> {
+        networksetup(&["-listallnetworkservices"])
+            .map(|o| {
+                o.lines()
+                    .skip(1)
+                    .filter(|l| !l.is_empty() && !l.starts_with('*'))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn disable() {
+        let mut changed = Vec::new();
+        for svc in services() {
+            let automatic = networksetup(&["-getinfo", &svc])
+                .is_some_and(|info| info.lines().any(|l| l.trim() == "IPv6: Automatic"));
+            if automatic && networksetup(&["-setv6off", &svc]).is_some() {
+                changed.push(svc);
+            }
+        }
+        if let Ok(json) = serde_json::to_vec(&changed) {
+            let _ = std::fs::write(STATE, json);
+        }
+    }
+
+    pub fn restore() {
+        let Ok(bytes) = std::fs::read(STATE) else { return };
+        let changed: Vec<String> = serde_json::from_slice(&bytes).unwrap_or_default();
+        for svc in &changed {
+            networksetup(&["-setv6automatic", svc]);
+        }
+        let _ = std::fs::remove_file(STATE);
+    }
+}
+
+/// Windows: same problem, solved with a temporary firewall rule that blocks
+/// outgoing global IPv6 so apps fall back to IPv4 inside the tunnel. The rule
+/// has a fixed name, so `restore` (also run at every helper start) always
+/// removes a leftover one.
+#[cfg(windows)]
+mod ipv6_guard {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    const RULE: &str = "name=homelink-tunnel-block-ipv6";
+
+    fn netsh(args: &[&str]) -> bool {
+        Command::new("netsh")
+            .args(args)
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    pub fn disable() {
+        restore();
+        netsh(&[
+            "advfirewall", "firewall", "add", "rule", RULE, "dir=out", "action=block",
+            "protocol=any", "remoteip=2000::/3", "enable=yes", "profile=any",
+        ]);
+    }
+
+    pub fn restore() {
+        netsh(&["advfirewall", "firewall", "delete", "rule", RULE]);
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
+mod ipv6_guard {
+    pub fn disable() {}
+    pub fn restore() {}
+}
+
 struct HelperArgs {
     socks: Option<SocketAddr>,
     bypass: Vec<IpAddr>,
@@ -143,6 +235,7 @@ pub fn helper_main(args: &[String]) -> i32 {
 async fn run_helper(args: HelperArgs, dir: PathBuf) -> i32 {
     // Undo anything a previous helper left behind if it was killed.
     let _ = tproxy_config::tproxy_remove(None).await;
+    ipv6_guard::restore();
     if args.restore {
         write_status(&dir, "restored");
         return 0;
@@ -197,8 +290,11 @@ async fn run_helper(args: HelperArgs, dir: PathBuf) -> i32 {
         }
     });
 
+    ipv6_guard::disable();
     write_status(&dir, "running");
-    match tun2proxy::general_run_async(t2p, tun2proxy::DEFAULT_MTU, false, token).await {
+    let result = tun2proxy::general_run_async(t2p, tun2proxy::DEFAULT_MTU, false, token).await;
+    ipv6_guard::restore();
+    match result {
         Ok(_) => {
             write_status(&dir, "stopped");
             0

@@ -38,7 +38,8 @@ but it **hasn't been tried on real networks yet**. See [the plan](docs/PLAN.md).
     some apps and games don't.
   - **Full tunnel** (asks for your admin password each time): all TCP traffic
     and DNS go through the host. UDP apps (some games, video calls) don't work
-    through it yet. On macOS, IPv6 isn't routed into the tunnel yet.
+    through it yet. IPv6 is switched off (macOS) or blocked by a temporary
+    firewall rule (Windows) while the tunnel is up, so nothing goes around it.
   - **SOCKS5 only**: point apps at 127.0.0.1:1080 yourself.
 - If your internet stops working after homelink crashed in full-tunnel mode,
   use **Connect → Trouble? → Repair network settings**.
