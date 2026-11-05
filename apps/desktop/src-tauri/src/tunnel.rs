@@ -339,8 +339,21 @@ async fn run_helper(args: HelperArgs, dir: PathBuf) -> i32 {
         let token = token.clone();
         let dir = dir.clone();
         async move {
+            let mut last = SystemTime::now();
+            let mut grace_until = None;
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
+                let now = SystemTime::now();
+                // A big gap means the computer slept (app and helper froze
+                // together). Give the app time to refresh the heartbeat
+                // instead of mistaking the old file for a dead app.
+                if now.duration_since(last).unwrap_or_default() > Duration::from_secs(10) {
+                    grace_until = Some(now + HEARTBEAT_STALE);
+                }
+                last = now;
+                if grace_until.is_some_and(|g| now < g) {
+                    continue;
+                }
                 if heartbeat_stale(&dir) {
                     token.cancel();
                     break;
@@ -452,9 +465,13 @@ impl Tunnel {
         let _ = wait_for(&self.dir, &["stopped"], Duration::from_secs(8)).await;
     }
 
-    /// Whether the helper reported a failure after starting.
+    /// Set if the tunnel failed or stopped on its own after starting.
     pub fn failed(&self) -> Option<String> {
-        read_status(&self.dir).filter(|s| s.starts_with("error")).map(|s| helper_error(&s))
+        match read_status(&self.dir).as_deref() {
+            Some("running") => None,
+            Some(s) if s.starts_with("error") => Some(helper_error(s)),
+            _ => Some("Full tunnel stopped. Traffic is no longer going through the host; disconnect and connect again.".into()),
+        }
     }
 }
 
