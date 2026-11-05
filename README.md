@@ -19,7 +19,9 @@ Client apps → system proxy or TUN → local SOCKS5
 ## Status
 
 Early preview. It builds and its automated tests pass on macOS and Windows,
-but it **hasn't been tried on real networks yet**. See [the plan](docs/PLAN.md).
+and it has been smoke-tested on one Mac (host and client on the same
+machine), but it **hasn't been tried across real networks yet**. See
+[the plan](docs/PLAN.md).
 
 ## Requirements
 
@@ -31,18 +33,22 @@ but it **hasn't been tried on real networks yet**. See [the plan](docs/PLAN.md).
   open each connection. Networks that only allow ports 80/443 still need the
   host's forwarded port to be one of those.
 - Speed is limited by the host's upload bandwidth.
-- Firewalls: the Windows installer adds an inbound UDP rule for homelink. On
-  macOS, if the firewall is on, allow incoming connections when asked.
+- Firewalls: the Windows installer adds inbound UDP and TCP rules for
+  homelink. On macOS, if the firewall is on, allow incoming connections when
+  asked.
 - Connect has three modes:
   - **System proxy** (default, no password): browsers and most apps follow it,
     some apps and games don't.
   - **Full tunnel** (asks for your admin password each time): all traffic,
-    TCP and UDP (games, calls), plus DNS goes through the host. IPv6 is switched off (macOS) or blocked by a temporary
-    firewall rule (Windows) while the tunnel is up, so nothing goes around it.
+    TCP and UDP (games, calls), plus DNS goes through the host. IPv6 is
+    switched off (macOS) or blocked by a temporary firewall rule (Windows)
+    while the tunnel is up, so nothing goes around it.
   - **SOCKS5 only**: point apps at 127.0.0.1:1080 yourself (CONNECT and UDP
     ASSOCIATE).
 - If your internet stops working after homelink crashed in full-tunnel mode,
   use **Connect → Trouble? → Repair network settings**.
+- When asking for help, use **Copy diagnostics** (in *Network check* or
+  *Trouble?*). It copies a text report with IP addresses partly hidden.
 
 ## Installing preview builds
 
@@ -72,7 +78,8 @@ homelink host                 # share (Ctrl-C to stop)
 homelink invite               # one-time code
 homelink add <code>           # on the other device
 homelink connect              # SOCKS5 on 127.0.0.1:1080
-homelink check                # CGNAT / UPnP check
+homelink check                # CGNAT / UPnP / NAT-PMP check
+homelink set-address <host> <addr>   # after a host's IP changed
 homelink devices | revoke <id> | hosts | remove <name> | id
 ```
 
@@ -90,9 +97,9 @@ Pushing a `v*` tag builds unsigned installers into a draft GitHub release.
 
 ```text
 crates/homelink-proto   wire format, invite codes
-crates/homelink-core    host, client, SOCKS5, UPnP, system proxy
-apps/desktop            Tauri app; full tunnel via tun2proxy (src-tauri/src/tunnel.rs)
+crates/homelink-core    host, client, SOCKS5 (TCP + UDP), UPnP/NAT-PMP, system proxy
 crates/homelink-cli     `homelink` command
+apps/desktop            Tauri app; full tunnel via tun2proxy (src-tauri/src/tunnel.rs)
 docs/                   plan and research notes
 ```
 
