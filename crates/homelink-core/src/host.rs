@@ -33,8 +33,11 @@ use crate::tls;
 /// Handshakes (and pairing attempts) from not-yet-known peers handled at once.
 const MAX_PENDING_HANDSHAKES: usize = 32;
 const MAX_CONNECTIONS_PER_DEVICE: usize = 8;
-/// TLS-over-TCP connections open at once (each carries one proxied connection).
+/// Authenticated TLS-over-TCP connections open at once (one per proxied connection).
 const MAX_TCP_CONNECTIONS: usize = 1024;
+/// TCP connections still in the TLS handshake. Kept small and separate so
+/// strangers can't use up the slots paired devices need.
+const MAX_TCP_HANDSHAKES: usize = 64;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -108,6 +111,7 @@ struct Shared {
     live_tcp: Mutex<HashMap<u64, LiveTcp>>,
     next_tcp: AtomicU64,
     handshakes: Arc<Semaphore>,
+    tcp_handshakes: Arc<Semaphore>,
     tcp_slots: Arc<Semaphore>,
 }
 
@@ -193,6 +197,7 @@ pub async fn start(store: Store, opts: HostOptions, approver: Approver) -> Resul
         live_tcp: Mutex::new(HashMap::new()),
         next_tcp: AtomicU64::new(1),
         handshakes: Arc::new(Semaphore::new(MAX_PENDING_HANDSHAKES)),
+        tcp_handshakes: Arc::new(Semaphore::new(MAX_TCP_HANDSHAKES)),
         tcp_slots: Arc::new(Semaphore::new(MAX_TCP_CONNECTIONS)),
     });
     info!("host listening on {local_addr}, device {}", short_id(&identity.id));
@@ -243,6 +248,14 @@ async fn decide_pairing(id: DeviceId, secret: &[u8; 32], name: String, shared: &
 
 async fn accept_loop(endpoint: quinn::Endpoint, shared: Arc<Shared>) {
     while let Some(incoming) = endpoint.accept().await {
+        // Under load, make new peers prove their address (stateless retry)
+        // before spending anything on them; this defeats spoofed floods.
+        if shared.handshakes.available_permits() < MAX_PENDING_HANDSHAKES / 2
+            && !incoming.remote_address_validated()
+        {
+            let _ = incoming.retry();
+            continue;
+        }
         let Ok(permit) = shared.handshakes.clone().try_acquire_owned() else {
             incoming.refuse();
             continue;
@@ -334,27 +347,32 @@ async fn tcp_accept_loop(listener: TcpListener, acceptor: TlsAcceptor, shared: A
                 continue;
             }
         };
-        let Ok(slot) = shared.tcp_slots.clone().try_acquire_owned() else { continue };
+        let Ok(pending) = shared.tcp_handshakes.clone().try_acquire_owned() else { continue };
         let acceptor = acceptor.clone();
         let shared = shared.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_tcp(tcp, acceptor, shared).await {
+            if let Err(e) = handle_tcp(tcp, acceptor, shared, pending).await {
                 debug!("tcp connection ended: {e:#}");
             }
-            drop(slot);
         });
     }
 }
 
-async fn handle_tcp(tcp: TcpStream, acceptor: TlsAcceptor, shared: Arc<Shared>) -> Result<()> {
+async fn handle_tcp(
+    tcp: TcpStream,
+    acceptor: TlsAcceptor,
+    shared: Arc<Shared>,
+    pending: OwnedSemaphorePermit,
+) -> Result<()> {
     let _ = tcp.set_nodelay(true);
     let tls = timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await??;
     let id = tls::peer_id_from_certs(tls.get_ref().1.peer_certificates())?;
     let (mut r, mut w) = tokio::io::split(tls);
 
     let Some(name) = shared.known_device(&id)? else {
-        // Unknown device: only a pairing request with a live invite is accepted.
-        let Ok(_permit) = shared.handshakes.clone().try_acquire_owned() else { return Ok(()) };
+        // Unknown device: only a pairing request with a live invite is
+        // accepted. It keeps its handshake slot until done.
+        let _pending = pending;
         let req = timeout(REQUEST_TIMEOUT, Request::read(&mut r)).await??;
         let status = match req {
             Request::Pair { secret, name } if !shared.store.invites()?.is_empty() => {
@@ -368,6 +386,9 @@ async fn handle_tcp(tcp: TcpStream, acceptor: TlsAcceptor, shared: Arc<Shared>) 
         return Ok(());
     };
 
+    // Paired device: move from a handshake slot to a regular one.
+    drop(pending);
+    let Ok(_slot) = shared.tcp_slots.clone().try_acquire_owned() else { return Ok(()) };
     let key = shared.next_tcp.fetch_add(1, Ordering::Relaxed);
     let stop = Arc::new(Notify::new());
     shared

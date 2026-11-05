@@ -118,7 +118,11 @@ Client apps
   cover a killed helper. Wintun is bundled on Windows. Known gaps: macOS IPv6
   isn't routed into the tunnel; UDP (other than DNS) is dropped. A signed
   privileged helper (SMAppService / Windows service) would remove the
-  per-connect password prompt. Original design notes:
+  per-connect password prompt. Hardening done: on macOS the helper keeps
+  tproxy-config's restore file in root-only `/var/run/homelink-tun` and never
+  follows symlinks when writing status. Open: on Windows the elevated helper
+  still uses the user's `%TEMP%` for that file; move it to a folder with a
+  restricted ACL. Original design notes:
   - TUN engine: evaluate **tun2proxy** (Rust, MIT/Apache, in-process, supports
     macOS and Windows/wintun) first, because it keeps one binary and a permissive
     licence. Fall back to sing-box (GPLv3, separate process) if tun2proxy fails

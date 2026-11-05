@@ -29,8 +29,45 @@ fn read_status(dir: &Path) -> Option<String> {
     std::fs::read_to_string(dir.join(STATUS)).ok().map(|s| s.trim().to_string())
 }
 
+/// Write the status file. The helper runs as admin/root inside a folder the
+/// user owns, so it must never follow a symlink planted there.
 fn write_status(dir: &Path, s: &str) {
-    let _ = std::fs::write(dir.join(STATUS), s);
+    let path = dir.join(STATUS);
+    if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.file_type().is_file()) {
+        let _ = std::fs::remove_file(&path);
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        const O_NOFOLLOW: i32 = 0x0100;
+        opts.custom_flags(O_NOFOLLOW);
+    }
+    if let Ok(mut f) = opts.open(&path) {
+        use std::io::Write;
+        let _ = f.write_all(s.as_bytes());
+    }
+}
+
+/// tproxy-config keeps its restore file in the temp folder. `/tmp` is
+/// writable by every user, so point the root helper at a root-only folder
+/// instead; otherwise another user could plant a fake restore file or a
+/// symlink. Must run before any threads start.
+#[cfg(unix)]
+fn use_private_temp_dir() -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let dir = Path::new("/var/run/homelink-tun");
+    match std::fs::symlink_metadata(dir) {
+        Ok(m) if m.file_type().is_dir() && m.uid() == 0 && m.mode() & 0o022 == 0 => {}
+        Ok(_) => return Err(format!("{} isn't a private root-owned folder", dir.display())),
+        Err(_) => std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| format!("can't create {}: {e}", dir.display()))?,
+    }
+    std::env::set_var("TMPDIR", dir);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +118,11 @@ pub fn helper_main(args: &[String]) -> i32 {
         eprintln!("homelink tunnel helper: --dir is required");
         return 2;
     };
+    #[cfg(unix)]
+    if let Err(e) = use_private_temp_dir() {
+        write_status(&dir, &format!("error: {e}"));
+        return 1;
+    }
     // Windows looks for wintun.dll next to the app; make that the working dir too.
     if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)) {
         let _ = std::env::set_current_dir(exe_dir);
