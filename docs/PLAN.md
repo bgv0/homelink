@@ -1,6 +1,12 @@
 # homelink plan
 
-Written 2026-11-05. Status: PLAN ONLY. Nothing below has been implemented or tested yet.
+Written 2026-11-05.
+
+**Status (2026-11-05):** built but not yet tested on real networks. Done:
+protocol, core engine, CLI, desktop app (system-proxy mode), CI on macOS and
+Windows, and a release workflow for unsigned installers. Not done: full-tunnel
+TUN mode, signing, and every manual network test in the gates below. Automated
+loopback tests pass.
 
 **Direction:** a public, open-source app for **anyone who can port-forward**. One simple app on
 **macOS and Windows**. Either machine can be the **host** ("share my internet")
@@ -44,7 +50,7 @@ Read this whole file before acting, including section 6 (operating rules).
 Client apps
   → TUN (client only, elevated helper)
   → local SOCKS5 on 127.0.0.1 (homelink client)
-  → QUIC (iroh endpoint, relays DISABLED) → host public IP:port (forwarded UDP)
+  → QUIC (quinn, TLS 1.3, pinned device keys) → host public IP:port (forwarded UDP)
   → homelink host (paired-device allowlist, no admin needed)
   → outbound TCP from the host to the internet
 ```
@@ -59,19 +65,19 @@ Client apps
   - `homelink-cli`: `homelink host | client | invite | devices | revoke | status`.
   - `apps/desktop`: Tauri v2 app for both OSes.
   - Privileged helpers: macOS LaunchDaemon and a Windows service, client side only.
-- **Transport**: iroh (pinned, 1.4.x at time of writing) with `RelayMode::Disabled`
-  and no n0 DNS discovery. The host binds a **fixed UDP port** (default 47420,
-  user-changeable). We still get QUIC, TLS 1.3, Ed25519 device keys and stream
-  multiplexing, but nothing is sent to third-party servers. Verify in Phase 1
-  that iroh with relays disabled and an explicit direct address works cleanly. If
-  it fights us, fall back to plain `quinn` with raw-public-key TLS (same design).
+- **Transport**: `quinn` (QUIC) with TLS 1.3 via rustls. Each device has a
+  self-signed certificate and its SHA-256 is the device ID. The client pins
+  the host's ID from the invite; the host checks the client's ID against its
+  allowlist before reading any data. The host binds a **fixed UDP port**
+  (default 47420, user-changeable). (iroh was dropped: with relays and
+  discovery off, it added nothing over quinn.)
 - **Port forwarding help**:
-  1. Try UPnP-IGD / NAT-PMP / PCP automatically (iroh ships a portmapper; check
-     it can map our fixed port, or use the `igd-next` crate).
+  1. Try UPnP-IGD automatically (`igd-next`, built). NAT-PMP/PCP is a later addition.
   2. If that fails, show a short guide: "Forward UDP 47420 to <this PC's LAN IP>",
      plus the LAN IP and a link to a router-specific guide.
   3. **CGNAT check**: get the router WAN IP (from UPnP if available) and the
-     public IP (STUN to a well-known public STUN server, the only outside lookup).
+     public IP (STUN to a well-known public STUN server, the only outside lookup;
+     it only reports the address and carries no traffic).
      If the WAN IP is in 100.64.0.0/10 or doesn't match the public IP, show
      "Your ISP uses CGNAT, port forwarding won't work. Ask your ISP for a public IP."
   4. **Reachability test**: the host can't reliably test itself (hairpin NAT
@@ -83,8 +89,7 @@ Client apps
   in the UI), otherwise the current public IP. If the public IP changes and
   there's no DDNS, the host app shows "your address changed, re-share the invite"
   and clients accept an updated invite without re-pairing. Optional later:
-  publish the address to the mainline DHT (pkarr), which iroh supports and which
-  needs no project server. Evaluate after v1.
+  publish the address to the mainline DHT (pkarr), which needs no project server. Evaluate after v1.
 - **Pairing**: the host clicks "Invite a device" and gets an invite (text code + QR):
   device ID, address:port, a single-use secret, 15-minute expiry. The client
   pastes or scans it, connects, and sends the secret. The **host user approves**
@@ -100,7 +105,10 @@ Client apps
     for unauthenticated peers.
   - No logging of destinations by default. Logs hold only connection
     events and errors.
-- **Client system-wide routing**:
+- **Client routing, step 1 (built): system proxy.** Connect points the OS proxy
+  setting at the local SOCKS5 server (macOS `networksetup`, Windows registry),
+  with crash recovery. Browsers and most apps follow it; no admin helper needed.
+- **Client system-wide routing, step 2 (not built): TUN full tunnel**:
   - TUN engine: evaluate **tun2proxy** (Rust, MIT/Apache, in-process, supports
     macOS and Windows/wintun) first, because it keeps one binary and a permissive
     licence. Fall back to sing-box (GPLv3, separate process) if tun2proxy fails
@@ -171,7 +179,7 @@ the user says to proceed. Report results plainly: "connected" isn't the same as
 
 Gate 0: Rust installed, test-host route chosen.
 
-### Phase 1: Transport spike (small Rust program, LAN first)
+### Phase 1: Transport spike — SKIPPED (went straight to Phase 2 with quinn)
 
 1. Minimal `spike` binary: host binds UDP 47420 with relays disabled; client
    connects with the host's device ID and `ip:port`; it echoes data and
@@ -179,8 +187,7 @@ Gate 0: Rust installed, test-host route chosen.
 2. Tests: same machine → LAN Mac↔Windows (both directions) → external over a
    forwarded port (phone hotspot client) once the Phase 0 test host exists.
 3. Check the portmapper: can it map our fixed port via UPnP on the test router?
-4. Record versions, results and any iroh friction in `docs/SPIKE-RESULTS.md`.
-   If iroh's direct-only mode is awkward, try plain `quinn` here and choose.
+4. Record results in `docs/RESEARCH.md`.
 
 Gate 1: direct QUIC works over LAN both ways, and externally through a forwarded
 port. Throughput is close to the line rate (record numbers).
@@ -260,7 +267,7 @@ security warnings (or only the documented SmartScreen one if unsigned on Windows
 
 ### Phase 6: Open-source release
 
-1. Licence: MIT OR Apache-2.0 if tun2proxy is used (matches iroh). If sing-box is
+1. Licence: MIT OR Apache-2.0 if tun2proxy is used (matches quinn/rustls). If sing-box is
    bundled, either license the project GPLv3 or ship sing-box as a separate,
    unmodified binary with its licence and source link. Decide in Phase 3.
 2. Dependency licence audit (`cargo deny`), `SECURITY.md`, `CONTRIBUTING.md`,
