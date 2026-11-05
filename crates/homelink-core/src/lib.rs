@@ -7,6 +7,7 @@
 pub mod client;
 pub mod host;
 pub mod identity;
+pub mod natpmp;
 pub mod netfilter;
 pub mod portmap;
 pub mod reach;

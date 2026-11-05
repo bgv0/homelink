@@ -1,6 +1,6 @@
-//! Automatic port forwarding via UPnP-IGD, kept alive in the background.
+//! Automatic port forwarding (UPnP-IGD, then NAT-PMP), kept alive in the background.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use igd_next::aio::tokio::{search_gateway, Tokio};
@@ -10,6 +10,8 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, info};
 
+use crate::natpmp;
+
 const LEASE: Duration = Duration::from_secs(3600);
 const RETRY: Duration = Duration::from_secs(300);
 const DESCRIPTION: &str = "homelink";
@@ -18,7 +20,7 @@ const DESCRIPTION: &str = "homelink";
 pub enum MapState {
     Trying,
     Mapped { external_ip: Option<IpAddr> },
-    /// The router didn't offer UPnP or refused; forward the port by hand.
+    /// The router didn't offer UPnP/NAT-PMP or refused; forward the port by hand.
     Unavailable(String),
 }
 
@@ -54,6 +56,55 @@ async fn map_once(gw: &Gateway<Tokio>, port: u16) -> Result<Option<IpAddr>, Stri
     Ok(gw.get_external_ip().await.ok())
 }
 
+enum Mapping {
+    Upnp(Gateway<Tokio>),
+    NatPmp(Ipv4Addr),
+}
+
+impl Mapping {
+    async fn remove(&self, port: u16) {
+        match self {
+            Mapping::Upnp(gw) => {
+                let _ = gw.remove_port(PortMappingProtocol::UDP, port).await;
+            }
+            Mapping::NatPmp(gw) => {
+                let _ = natpmp::map_udp(*gw, port, 0).await;
+            }
+        }
+    }
+}
+
+/// Try UPnP, then NAT-PMP. Returns the mapping, the router's public IP if
+/// known, and when to renew.
+async fn try_map(port: u16) -> Result<(Mapping, Option<IpAddr>, Duration), String> {
+    let upnp_err = match find_gateway().await {
+        Ok(gw) => match map_once(&gw, port).await {
+            Ok(ip) => return Ok((Mapping::Upnp(gw), ip, LEASE / 2)),
+            Err(e) => e,
+        },
+        Err(e) => e,
+    };
+    let Some(gw) = natpmp::default_gateway() else { return Err(upnp_err) };
+    match natpmp::map_udp(gw, port, LEASE.as_secs() as u32).await {
+        Ok(m) if m.external_port == port => {
+            let ip = natpmp::external_ip(gw).await.map(IpAddr::V4);
+            let renew = Duration::from_secs((u64::from(m.lifetime) / 2).max(60));
+            Ok((Mapping::NatPmp(gw), ip, renew))
+        }
+        Ok(m) => {
+            natpmp::map_udp(gw, port, 0).await.ok();
+            Err(format!(
+                "router would only forward port {} instead of {port}",
+                m.external_port
+            ))
+        }
+        Err(e) => {
+            debug!("NAT-PMP: {e}");
+            Err(format!("{upnp_err} (NAT-PMP: {e})"))
+        }
+    }
+}
+
 pub struct PortMapper {
     pub state: watch::Receiver<MapState>,
     stop: Option<oneshot::Sender<()>>,
@@ -66,26 +117,17 @@ impl PortMapper {
         let (tx, state) = watch::channel(MapState::Trying);
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
-            let mut mapped_on: Option<Gateway<Tokio>> = None;
+            let mut mapped: Option<Mapping> = None;
             loop {
-                let result = match find_gateway().await {
-                    Ok(gw) => match map_once(&gw, port).await {
-                        Ok(ip) => {
-                            mapped_on = Some(gw);
-                            Ok(ip)
-                        }
-                        Err(e) => Err(e),
-                    },
-                    Err(e) => Err(e),
-                };
-                let wait = match result {
-                    Ok(ip) => {
-                        info!("UPnP: forwarded UDP {port}");
+                let wait = match try_map(port).await {
+                    Ok((m, ip, renew)) => {
+                        info!("forwarded UDP {port} ({})", match m { Mapping::Upnp(_) => "UPnP", Mapping::NatPmp(_) => "NAT-PMP" });
+                        mapped = Some(m);
                         let _ = tx.send(MapState::Mapped { external_ip: ip });
-                        LEASE / 2
+                        renew
                     }
                     Err(e) => {
-                        debug!("UPnP: {e}");
+                        debug!("port mapping: {e}");
                         let _ = tx.send(MapState::Unavailable(e));
                         RETRY
                     }
@@ -95,8 +137,8 @@ impl PortMapper {
                     _ = &mut stop_rx => break,
                 }
             }
-            if let Some(gw) = mapped_on {
-                let _ = gw.remove_port(PortMappingProtocol::UDP, port).await;
+            if let Some(m) = mapped {
+                m.remove(port).await;
             }
         });
         PortMapper { state, stop: Some(stop_tx), task }

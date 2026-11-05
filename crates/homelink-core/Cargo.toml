@@ -20,6 +20,7 @@ ring.workspace = true
 dirs.workspace = true
 igd-next.workspace = true
 tracing.workspace = true
+netdev = { version = "0.47", default-features = false, features = ["gateway"] }
 
 [dev-dependencies]
 tempfile.workspace = true

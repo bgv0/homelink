@@ -222,7 +222,12 @@ async fn run(cli: Cli) -> Result<()> {
             let show = |ip: Option<IpAddr>| ip.map(|i| i.to_string()).unwrap_or_else(|| "unknown".into());
             println!("This computer (LAN):  {}", show(r.lan_ip));
             println!("Public address:       {}", show(r.public_ip));
-            println!("Router UPnP:          {}", if r.upnp { "available" } else { "not available" });
+            let auto = match (r.upnp, r.natpmp) {
+                (true, _) => "available (UPnP)",
+                (false, true) => "available (NAT-PMP)",
+                _ => "not available",
+            };
+            println!("Automatic forwarding: {auto}");
             println!("Router WAN address:   {}", show(r.router_wan_ip));
             println!("\n{}", r.verdict.describe());
             Ok(())
@@ -278,7 +283,7 @@ async fn run_host(store: Store, s: HostSettings) -> Result<()> {
             while state.changed().await.is_ok() {
                 let msg = match &*state.borrow() {
                     MapState::Trying => continue,
-                    MapState::Mapped { .. } => "Router: port forwarded automatically (UPnP).".to_string(),
+                    MapState::Mapped { .. } => "Router: port forwarded automatically.".to_string(),
                     MapState::Unavailable(e) => format!(
                         "Router: {e}. Forward UDP {port} to {} on your router by hand.",
                         portmap::lan_ip().map(|i| i.to_string()).unwrap_or_else(|| "this computer".into())

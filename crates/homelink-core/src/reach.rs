@@ -28,7 +28,7 @@ impl Verdict {
             Verdict::Forwardable => "Your router has a public IP address, so port forwarding should work.",
             Verdict::Cgnat => "Your internet provider uses CGNAT (a shared address), so port forwarding can't work. Ask your provider for a public IPv4 address.",
             Verdict::DoubleNat => "There are two routers between this computer and the internet. Forward the port on both, or put the first one in bridge mode.",
-            Verdict::Unknown => "Couldn't check the router automatically (UPnP is off). Forward the port by hand and test from another network.",
+            Verdict::Unknown => "Couldn't check the router automatically (UPnP and NAT-PMP are off). Forward the port by hand and test from another network.",
             Verdict::NoInternet => "Couldn't reach the internet to check your public address.",
         }
     }
@@ -40,6 +40,7 @@ pub struct Report {
     pub public_ip: Option<IpAddr>,
     pub router_wan_ip: Option<IpAddr>,
     pub upnp: bool,
+    pub natpmp: bool,
     pub verdict: Verdict,
 }
 
@@ -57,11 +58,20 @@ pub fn judge(public_ip: Option<IpAddr>, router_wan_ip: Option<IpAddr>) -> Verdic
 pub async fn check() -> Report {
     let lan_ip = portmap::lan_ip();
     let (public_ip, gw) = tokio::join!(stun::public_ip(), portmap::find_gateway());
-    let (upnp, router_wan_ip) = match gw {
+    let (upnp, mut router_wan_ip) = match gw {
         Ok(gw) => (true, gw.get_external_ip().await.ok()),
         Err(_) => (false, None),
     };
-    Report { lan_ip, public_ip, router_wan_ip, upnp, verdict: judge(public_ip, router_wan_ip) }
+    let mut natpmp = false;
+    if router_wan_ip.is_none() {
+        if let Some(gw) = crate::natpmp::default_gateway() {
+            if let Some(ip) = crate::natpmp::external_ip(gw).await {
+                natpmp = true;
+                router_wan_ip = Some(IpAddr::V4(ip));
+            }
+        }
+    }
+    Report { lan_ip, public_ip, router_wan_ip, upnp, natpmp, verdict: judge(public_ip, router_wan_ip) }
 }
 
 /// Re-checks the public IP in the background. Stops when dropped.

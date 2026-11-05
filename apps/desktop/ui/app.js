@@ -253,13 +253,13 @@ $("check-btn").addEventListener("click", (ev) =>
     const r = await invoke("check_network");
     $("check-lan").textContent = r.lan_ip || "unknown";
     $("check-public").textContent = r.public_ip || "unknown";
-    $("check-wan").textContent = r.router_wan_ip || (r.upnp ? "unknown" : "router doesn't say (UPnP off)");
+    $("check-wan").textContent = r.router_wan_ip || (r.upnp ? "unknown" : "router doesn't say (UPnP and NAT-PMP off)");
     const v = $("check-verdict");
     v.textContent = {
       Forwardable: "Your router has a public address, so port forwarding should work.",
       Cgnat: "Your internet provider uses CGNAT (a shared address). Port forwarding can't work on this connection. Ask your provider for a public IPv4 address.",
       DoubleNat: "There are two routers in a row. Forward the port on both, or put the first one in bridge mode.",
-      Unknown: "Couldn't ask your router (UPnP is off). Forward the port by hand, then test from another network such as a phone hotspot.",
+      Unknown: "Couldn't ask your router (UPnP and NAT-PMP are off). Forward the port by hand, then test from another network such as a phone hotspot.",
       NoInternet: "Couldn't reach the internet to check your public address.",
     }[r.verdict];
     v.className = r.verdict === "Forwardable" ? "ok" : r.verdict === "Cgnat" ? "bad" : "warn";
