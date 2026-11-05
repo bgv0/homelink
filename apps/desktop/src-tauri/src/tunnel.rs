@@ -70,6 +70,72 @@ fn use_private_temp_dir() -> Result<(), String> {
     Ok(())
 }
 
+/// Windows version: `%ProgramData%\homelink-tun`, owned by Administrators and
+/// readable/writable only by SYSTEM and Administrators. Users can create
+/// folders in ProgramData, so a folder someone else made first is wiped.
+#[cfg(windows)]
+fn use_private_temp_dir() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const NO_WINDOW: u32 = 0x0800_0000;
+    const ADMINS: &str = "S-1-5-32-544";
+    const SYSTEM: &str = "S-1-5-18";
+
+    let base = std::env::var_os("ProgramData").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
+    let dir = base.join("homelink-tun");
+    let dir_s = dir.display().to_string();
+
+    if let Ok(m) = std::fs::symlink_metadata(&dir) {
+        if !m.file_type().is_dir() || m.file_type().is_symlink() {
+            return Err(format!("{dir_s} isn't a plain folder"));
+        }
+        let owner = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &format!(
+                    "(Get-Acl -LiteralPath '{}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value",
+                    dir_s.replace('\'', "''")
+                ),
+            ])
+            .creation_flags(NO_WINDOW)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        if owner != ADMINS && owner != SYSTEM {
+            std::fs::remove_dir_all(&dir).map_err(|e| format!("can't reset {dir_s}: {e}"))?;
+        }
+    }
+    if !dir.exists() {
+        std::fs::create_dir(&dir).map_err(|e| format!("can't create {dir_s}: {e}"))?;
+    }
+    let icacls = |args: &[&str]| {
+        Command::new("icacls")
+            .arg(&dir_s)
+            .args(args)
+            .creation_flags(NO_WINDOW)
+            .status()
+            .is_ok_and(|s| s.success())
+    };
+    let owned = icacls(&["/setowner", &format!("*{ADMINS}"), "/T", "/C", "/Q"]);
+    let locked = icacls(&[
+        "/inheritance:r",
+        "/grant:r",
+        &format!("*{SYSTEM}:(OI)(CI)F"),
+        &format!("*{ADMINS}:(OI)(CI)F"),
+        "/T",
+        "/C",
+        "/Q",
+    ]);
+    if !(owned && locked) {
+        return Err(format!("can't secure {dir_s}"));
+    }
+    std::env::set_var("TMP", &dir);
+    std::env::set_var("TEMP", &dir);
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Helper side (runs elevated)
 // ---------------------------------------------------------------------------
@@ -210,7 +276,7 @@ pub fn helper_main(args: &[String]) -> i32 {
         eprintln!("homelink tunnel helper: --dir is required");
         return 2;
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     if let Err(e) = use_private_temp_dir() {
         write_status(&dir, &format!("error: {e}"));
         return 1;
