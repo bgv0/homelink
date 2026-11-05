@@ -24,6 +24,10 @@ use crate::identity::{device_id, Identity};
 pub const KEEP_ALIVE: Duration = Duration::from_secs(10);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STREAMS_PER_CONNECTION: u32 = 512;
+/// Per-stream receive window. quinn's default (~1.25 MB) caps one download at
+/// about 100 Mbit/s at 100 ms ping; 16 MB allows ~1 Gbit/s at ~130 ms.
+const STREAM_WINDOW: u32 = 16 * 1024 * 1024;
+const CONNECTION_WINDOW: u32 = 64 * 1024 * 1024;
 
 fn provider() -> Arc<CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
@@ -34,6 +38,9 @@ fn transport(keep_alive: bool) -> Arc<quinn::TransportConfig> {
     t.max_idle_timeout(Some(IDLE_TIMEOUT.try_into().expect("valid idle timeout")));
     t.max_concurrent_bidi_streams(MAX_STREAMS_PER_CONNECTION.into());
     t.max_concurrent_uni_streams(0u32.into());
+    t.stream_receive_window(STREAM_WINDOW.into());
+    t.receive_window(CONNECTION_WINDOW.into());
+    t.send_window(u64::from(CONNECTION_WINDOW));
     if keep_alive {
         t.keep_alive_interval(Some(KEEP_ALIVE));
     }

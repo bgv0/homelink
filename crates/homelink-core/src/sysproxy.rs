@@ -72,6 +72,23 @@ pub fn is_enabled(dir: &Path) -> bool {
     dir.join(MARKER).exists()
 }
 
+/// Value of `name` in `reg query` output, e.g.
+/// `    ProxyServer    REG_SZ    socks=127.0.0.1:1080`.
+#[cfg(any(windows, test))]
+fn parse_reg_value(output: &str, name: &str) -> Option<String> {
+    output.lines().find_map(|l| {
+        let l = l.trim_start();
+        let rest = l.strip_prefix(name)?;
+        // Must be followed by whitespace, so "ProxyServer" doesn't match "ProxyServerX".
+        if !rest.starts_with(char::is_whitespace) {
+            return None;
+        }
+        let rest = rest.trim_start();
+        let (_ty, value) = rest.split_once(char::is_whitespace)?;
+        Some(value.trim().to_string())
+    })
+}
+
 #[cfg(target_os = "macos")]
 mod platform {
     use super::*;
@@ -181,13 +198,10 @@ mod platform {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     }
 
-    /// Value of a registry entry from `reg query` output, if present.
+    /// Value of a registry entry, if present.
     fn query(name: &str) -> Option<String> {
         let out = reg(&["query", KEY, "/v", name]).ok()?;
-        out.lines()
-            .find(|l| l.trim_start().starts_with(name))
-            .and_then(|l| l.split("    ").filter(|s| !s.trim().is_empty()).nth(2))
-            .map(|s| s.trim().to_string())
+        super::parse_reg_value(&out, name)
     }
 
     /// WinINET override list: our local ranges plus whatever was there.
@@ -260,5 +274,20 @@ mod platform {
     }
     pub fn disable(_: &Saved) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_reg_query_output() {
+        let out = "\r\nHKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings\r\n    ProxyServer    REG_SZ    socks=127.0.0.1:1080\r\n    ProxyEnable    REG_DWORD    0x1\r\n\r\n";
+        assert_eq!(parse_reg_value(out, "ProxyServer").as_deref(), Some("socks=127.0.0.1:1080"));
+        assert_eq!(parse_reg_value(out, "ProxyEnable").as_deref(), Some("0x1"));
+        assert_eq!(parse_reg_value(out, "ProxyOverride"), None);
+        let spaced = "    ProxyOverride    REG_SZ    <local>;my host.example\r\n";
+        assert_eq!(parse_reg_value(spaced, "ProxyOverride").as_deref(), Some("<local>;my host.example"));
     }
 }

@@ -5,6 +5,8 @@ const { listen } = window.__TAURI__.event;
 
 const $ = (id) => document.getElementById(id);
 let state = null;
+let lastSample = null; // for live speed: { t, hostUp, hostDown, cliUp, cliDown }
+let rates = { hostUp: 0, hostDown: 0, cliUp: 0, cliDown: 0 };
 let busy = false;
 let settingsLoaded = false;
 
@@ -17,6 +19,28 @@ function toast(msg, isError = false) {
   t.hidden = false;
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => (t.hidden = true), isError ? 7000 : 3000);
+}
+
+function rate(n) {
+  return `${bytes(n)}/s`;
+}
+
+function sampleRates() {
+  const now = performance.now();
+  const cur = {
+    t: now,
+    hostUp: state.sharing ? state.sharing.up : 0,
+    hostDown: state.sharing ? state.sharing.down : 0,
+    cliUp: state.connection ? state.connection.up : 0,
+    cliDown: state.connection ? state.connection.down : 0,
+  };
+  if (lastSample && now > lastSample.t) {
+    const dt = (now - lastSample.t) / 1000;
+    for (const k of ["hostUp", "hostDown", "cliUp", "cliDown"]) {
+      rates[k] = Math.max(0, (cur[k] - lastSample[k]) / dt);
+    }
+  }
+  lastSample = cur;
 }
 
 function bytes(n) {
@@ -112,7 +136,8 @@ function render() {
       changed.textContent = `Your public address changed from ${s.address_changed_from} to ${s.address}. ` +
         "Devices can't find this computer until you send them a new invite (or set a DDNS name in settings).";
     }
-    $("share-traffic").textContent = `↑ ${bytes(s.down)} sent to devices · ↓ ${bytes(s.up)} from devices`;
+    $("share-traffic").textContent =
+      `${rate(rates.hostDown)} to devices · ${rate(rates.hostUp)} from devices · ${bytes(s.down + s.up)} total`;
   }
 
   // Devices
@@ -154,7 +179,7 @@ function render() {
     ? [
         c.rtt_ms != null ? `Ping ${c.rtt_ms} ms` : null,
         c.transport === "Tcp" ? "via TCP (UDP blocked here)" : null,
-        `↑ ${bytes(c.up)} ↓ ${bytes(c.down)}`,
+        `↓ ${rate(rates.cliDown)} ↑ ${rate(rates.cliUp)}`,
         {
           system: "Apps go through the host",
           tunnel: "All traffic goes through the host",
@@ -203,6 +228,7 @@ function render() {
 async function refresh() {
   try {
     state = await invoke("overview");
+    sampleRates();
     render();
   } catch (e) {
     toast(String(e), true);
