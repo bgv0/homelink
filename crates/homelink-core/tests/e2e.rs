@@ -106,6 +106,14 @@ async fn pair_then_proxy_through_socks() {
     writer.await.unwrap();
     assert_eq!(got, payload);
     assert!(client.rtt().await.is_some());
+
+    // Counters: echo means the same bytes went up and came back down.
+    use std::sync::atomic::Ordering::Relaxed;
+    let n = payload.len() as u64;
+    assert_eq!(client.traffic.up.load(Relaxed), n);
+    assert_eq!(client.traffic.down.load(Relaxed), n);
+    assert_eq!(env.host.traffic.up.load(Relaxed), n);
+    assert_eq!(env.host.traffic.down.load(Relaxed), n);
 }
 
 #[tokio::test]

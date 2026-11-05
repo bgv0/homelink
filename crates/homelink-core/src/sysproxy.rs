@@ -13,16 +13,35 @@ use serde::{Deserialize, Serialize};
 
 const MARKER: &str = "sysproxy.json";
 
+/// Local destinations that skip the proxy, so the router page, printers and
+/// other LAN devices keep working while connected. (Windows uses its own
+/// WinINET syntax, see `override_list`.)
+#[cfg(target_os = "macos")]
+const BYPASS: &[&str] = &[
+    "localhost",
+    "127.0.0.1",
+    "*.local",
+    "10.0.0.0/8",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "169.254.0.0/16",
+];
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Saved {
     /// macOS network services we turned the SOCKS proxy on for.
     #[serde(default)]
     services: Vec<String>,
+    /// macOS: each service's bypass list before we changed it.
+    #[serde(default)]
+    prev_bypass: std::collections::HashMap<String, Vec<String>>,
     /// Windows: previous ProxyServer / ProxyEnable values.
     #[serde(default)]
     prev_server: Option<String>,
     #[serde(default)]
     prev_enable: Option<u32>,
+    #[serde(default)]
+    prev_override: Option<String>,
 }
 
 pub fn enable(dir: &Path, socks: SocketAddr) -> Result<()> {
@@ -80,29 +99,67 @@ mod platform {
             .collect())
     }
 
+    fn bypass_list(svc: &str) -> Vec<String> {
+        // Prints "There aren't any bypass domains set on <svc>." when empty.
+        networksetup(&["-getproxybypassdomains", svc])
+            .map(|out| {
+                out.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.contains(' '))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn set_bypass(svc: &str, list: &[String]) -> Result<()> {
+        let mut args = vec!["-setproxybypassdomains", svc];
+        if list.is_empty() {
+            args.push("Empty");
+        } else {
+            args.extend(list.iter().map(String::as_str));
+        }
+        networksetup(&args).map(|_| ())
+    }
+
     pub fn enable(socks: SocketAddr) -> Result<Saved> {
         let ip = socks.ip().to_string();
         let port = socks.port().to_string();
-        let mut done = Vec::new();
+        let mut saved = Saved::default();
         for svc in services()? {
-            let r = networksetup(&["-setsocksfirewallproxy", &svc, &ip, &port])
-                .and_then(|_| networksetup(&["-setsocksfirewallproxystate", &svc, "on"]));
-            match r {
-                Ok(_) => done.push(svc),
-                Err(e) => {
-                    disable(&Saved { services: done, ..Default::default() }).ok();
-                    return Err(e);
+            let prev = bypass_list(&svc);
+            let mut list = prev.clone();
+            for b in BYPASS {
+                if !list.iter().any(|x| x == b) {
+                    list.push(b.to_string());
                 }
             }
+            let r = set_bypass(&svc, &list)
+                .and_then(|_| networksetup(&["-setsocksfirewallproxy", &svc, &ip, &port]))
+                .and_then(|_| networksetup(&["-setsocksfirewallproxystate", &svc, "on"]));
+            saved.prev_bypass.insert(svc.clone(), prev);
+            saved.services.push(svc);
+            if let Err(e) = r {
+                disable(&saved).ok();
+                return Err(e);
+            }
         }
-        Ok(Saved { services: done, ..Default::default() })
+        Ok(saved)
     }
 
     pub fn disable(saved: &Saved) -> Result<()> {
+        let mut first_err = None;
         for svc in &saved.services {
-            networksetup(&["-setsocksfirewallproxystate", svc, "off"])?;
+            let r = networksetup(&["-setsocksfirewallproxystate", svc, "off"]).map(|_| ());
+            let r2 = match saved.prev_bypass.get(svc) {
+                Some(prev) => set_bypass(svc, prev),
+                None => Ok(()),
+            };
+            if let Err(e) = r.and(r2) {
+                first_err.get_or_insert(e);
+            }
         }
-        Ok(())
+        first_err.map_or(Ok(()), Err)
     }
 }
 
@@ -133,21 +190,62 @@ mod platform {
             .map(|s| s.trim().to_string())
     }
 
+    /// WinINET override list: our local ranges plus whatever was there.
+    fn override_list(prev: Option<&str>) -> String {
+        let mut items: Vec<String> = prev
+            .unwrap_or("")
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect();
+        let mut ours = vec![
+            "<local>".to_string(),
+            "localhost".into(),
+            "127.*".into(),
+            "10.*".into(),
+            "192.168.*".into(),
+            "169.254.*".into(),
+        ];
+        ours.extend((16..32).map(|n| format!("172.{n}.*")));
+        for o in ours {
+            if !items.contains(&o) {
+                items.push(o);
+            }
+        }
+        items.join(";")
+    }
+
+    fn restore(name: &str, prev: &Option<String>) -> Result<()> {
+        match prev {
+            Some(s) => reg(&["add", KEY, "/v", name, "/t", "REG_SZ", "/d", s, "/f"]).map(|_| ()),
+            None => {
+                let _ = reg(&["delete", KEY, "/v", name, "/f"]);
+                Ok(())
+            }
+        }
+    }
+
     pub fn enable(socks: SocketAddr) -> Result<Saved> {
         let prev_server = query("ProxyServer");
+        let prev_override = query("ProxyOverride");
         let prev_enable = query("ProxyEnable")
             .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+        let saved = Saved { prev_server, prev_enable, prev_override, ..Default::default() };
         let server = format!("socks={socks}");
-        reg(&["add", KEY, "/v", "ProxyServer", "/t", "REG_SZ", "/d", &server, "/f"])?;
-        reg(&["add", KEY, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "1", "/f"])?;
-        Ok(Saved { prev_server, prev_enable, ..Default::default() })
+        let over = override_list(saved.prev_override.as_deref());
+        let r = reg(&["add", KEY, "/v", "ProxyServer", "/t", "REG_SZ", "/d", &server, "/f"])
+            .and_then(|_| reg(&["add", KEY, "/v", "ProxyOverride", "/t", "REG_SZ", "/d", &over, "/f"]))
+            .and_then(|_| reg(&["add", KEY, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", "1", "/f"]));
+        if let Err(e) = r {
+            disable(&saved).ok();
+            return Err(e);
+        }
+        Ok(saved)
     }
 
     pub fn disable(saved: &Saved) -> Result<()> {
-        match &saved.prev_server {
-            Some(s) => reg(&["add", KEY, "/v", "ProxyServer", "/t", "REG_SZ", "/d", s, "/f"])?,
-            None => reg(&["delete", KEY, "/v", "ProxyServer", "/f"]).unwrap_or_default(),
-        };
+        restore("ProxyServer", &saved.prev_server)?;
+        restore("ProxyOverride", &saved.prev_override)?;
         let enable = saved.prev_enable.unwrap_or(0).to_string();
         reg(&["add", KEY, "/v", "ProxyEnable", "/t", "REG_DWORD", "/d", &enable, "/f"])?;
         Ok(())

@@ -23,7 +23,15 @@ const REPLY_ATYP_UNSUPPORTED: u8 = 8;
 
 pub async fn serve(client: Arc<Client>, listener: TcpListener) -> Result<()> {
     loop {
-        let (sock, _) = listener.accept().await?;
+        let sock = match listener.accept().await {
+            Ok((s, _)) => s,
+            Err(e) => {
+                // Usually out of file handles: back off instead of giving up.
+                debug!("socks accept: {e}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+        };
         let client = client.clone();
         tokio::spawn(async move {
             if let Err(e) = handle(sock, client).await {
@@ -38,7 +46,7 @@ async fn handle(mut sock: TcpStream, client: Arc<Client>) -> Result<()> {
     match client.open(&target).await {
         Ok((send, recv)) => {
             sock.write_all(&reply(REPLY_OK)).await?;
-            splice(send, recv, sock, &client.traffic, true).await;
+            splice(send, recv, sock, &client.traffic, false).await;
         }
         Err(e) => {
             debug!("socks: {target}: {e}");

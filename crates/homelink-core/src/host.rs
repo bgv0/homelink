@@ -270,7 +270,7 @@ async fn handle_stream(mut send: quinn::SendStream, mut recv: quinn::RecvStream,
         Request::Connect(target) => match open_target(&target, &shared.opts).await {
             Ok(tcp) => {
                 if send.write_all(&[Status::Ok as u8]).await.is_ok() {
-                    splice(send, recv, tcp, &shared.traffic, false).await;
+                    splice(send, recv, tcp, &shared.traffic, true).await;
                 }
             }
             Err(status) => {
