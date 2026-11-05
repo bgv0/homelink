@@ -1,0 +1,25 @@
+[package]
+name = "homelink-core"
+description = "Host and client engine for homelink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+homelink-proto.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+quinn.workspace = true
+rustls.workspace = true
+rcgen.workspace = true
+ring.workspace = true
+dirs.workspace = true
+igd-next.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
