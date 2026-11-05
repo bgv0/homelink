@@ -159,6 +159,10 @@ function render() {
   );
   $("device-empty").hidden = state.devices.length > 0;
 
+  let introHidden = false;
+  try { introHidden = localStorage.getItem("intro-hidden") === "1"; } catch (_) {}
+  $("intro").hidden = introHidden || state.devices.length > 0 || state.hosts.length > 0;
+
   // Settings (only fill once so we don't overwrite the user's typing)
   if (!settingsLoaded) {
     const st = state.settings;
@@ -335,6 +339,11 @@ $("add-form").addEventListener("submit", (ev) => {
       $("add-note").textContent = "";
     }
   });
+});
+
+$("intro-close").addEventListener("click", () => {
+  try { localStorage.setItem("intro-hidden", "1"); } catch (_) {}
+  $("intro").hidden = true;
 });
 
 // ---------- connection mode ----------

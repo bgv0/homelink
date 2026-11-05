@@ -254,3 +254,5 @@ dialog::backdrop { background: rgb(0 0 0 / 0.4); }
 
 label > select { margin-top: 4px; }
 .small { font-size: 12px; }
+.intro ol { margin: 8px 0 4px; padding-left: 20px; }
+.intro li { margin: 4px 0; }

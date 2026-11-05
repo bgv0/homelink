@@ -17,6 +17,19 @@
   <main>
     <!-- SHARE: this computer is the host -->
     <section id="panel-share" role="tabpanel">
+      <div class="card intro" id="intro" hidden>
+        <div class="row">
+          <h2>How homelink works</h2>
+          <button id="intro-close" title="Hide">✕</button>
+        </div>
+        <ol>
+          <li>On the computer whose internet you want to use, click <strong>Start sharing</strong>.</li>
+          <li>Click <strong>Invite a device</strong> and send the code to your other computer.</li>
+          <li>On the other computer, open <strong>Connect → Add a host</strong>, paste the code, then click <strong>Connect</strong>.</li>
+        </ol>
+        <p class="muted small">The sharing computer needs port forwarding on its router. Use <em>Network check</em> below to see if yours can.</p>
+      </div>
+
       <div class="card hero">
         <div>
           <h1 id="share-title">Not sharing</h1>
