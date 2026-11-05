@@ -256,3 +256,16 @@ label > select { margin-top: 4px; }
 .small { font-size: 12px; }
 .intro ol { margin: 8px 0 4px; padding-left: 20px; }
 .intro li { margin: 4px 0; }
+
+/* Keep everything inside the window: a <select> is as wide as its longest
+   option unless told otherwise, and flex children don't shrink below their
+   content by default. */
+select { width: 100%; max-width: 100%; }
+.hero > div,
+.row > :first-child { min-width: 0; }
+main, .card { max-width: 100%; }
+.list li .grow > div {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

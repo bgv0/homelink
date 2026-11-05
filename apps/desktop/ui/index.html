@@ -114,9 +114,9 @@
         <p class="muted empty" id="host-empty">No hosts yet. Add one with an invite code below.</p>
         <label>When connected
           <select id="conn-mode">
-            <option value="system">Send apps through the host (system proxy)</option>
-            <option value="tunnel">Send all traffic through the host (asks for admin password)</option>
-            <option value="proxy">Only run a SOCKS5 proxy on 127.0.0.1:1080</option>
+            <option value="system">System proxy: apps use the host</option>
+            <option value="tunnel">Full tunnel: all traffic (admin password)</option>
+            <option value="proxy">SOCKS5 proxy only (127.0.0.1:1080)</option>
           </select>
         </label>
         <p class="muted small" id="mode-help"></p>
