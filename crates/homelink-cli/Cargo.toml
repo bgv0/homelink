@@ -1,0 +1,18 @@
+[package]
+name = "homelink-cli"
+description = "Command-line interface for homelink"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "homelink"
+path = "src/main.rs"
+
+[dependencies]
+homelink-proto.workspace = true
+homelink-core.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+clap.workspace = true
+tracing-subscriber.workspace = true
