@@ -15,6 +15,10 @@ Client apps → system proxy or TUN → local SOCKS5
 - Devices join with a one-time invite code; the host approves each one and can
   remove it at any time.
 - By default, connected devices can't reach the host's local network.
+- Free: no subscription, no paid services.
+
+**New here? Follow the [setup guide](docs/SETUP.md)**: installing, port
+forwarding, pairing and connecting, step by step.
 
 ## Status
 
@@ -50,26 +54,12 @@ machine), but it **hasn't been tried across real networks yet**. See
 - When asking for help, use **Copy diagnostics** (in *Network check* or
   *Trouble?*). It copies a text report with IP addresses partly hidden.
 
-## Installing preview builds
+## Installing and using
 
-Preview builds aren't signed by Apple or Microsoft yet, so the system warns:
-
-- **macOS**: open the `.dmg`, drag homelink to Applications, open it once,
-  then go to **System Settings → Privacy & Security** and click **Open Anyway**.
-- **Windows**: if SmartScreen appears, click **More info → Run anyway**. The
-  installer asks for admin rights once (to add the firewall rule).
-
-## Using the app
-
-1. On the host: **Share → Start sharing**. Check the router line says the port
-   is forwarded (or forward UDP and TCP 47420 to the computer by hand).
-2. **Invite a device**, copy the code, and send it to the other device.
-3. On the other device: **Connect → Add a host**, paste the code. Approve it on
-   the host.
-4. Click **Connect**.
-
-Tip: if your home IP changes, set a DDNS hostname in *Sharing settings* so
-invites and saved hosts keep working.
+See the **[setup guide](docs/SETUP.md)**. In short: install on both computers
+(the apps aren't signed, so macOS and Windows warn once), check the host can
+be reached, forward port 47420 (UDP and TCP) if the router doesn't do it
+automatically, invite the other computer, and click **Connect**.
 
 ## Command line
 

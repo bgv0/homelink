@@ -12,10 +12,11 @@ You can also run the *Release* workflow by hand (Actions tab → Release → Run
 workflow); that makes a draft named `dev-<commit>`. Check the draft, then
 publish it.
 
-These builds are **unsigned** (macOS ad-hoc signed only), so users see
-security warnings. The README explains how to get past them.
+Builds are **unsigned** (macOS ad-hoc signed only), on purpose: homelink
+stays free with no paid accounts. Users see a one-time security warning;
+[SETUP.md](SETUP.md) explains how to get past it.
 
-## Signing (when you're ready)
+## Signing (optional, not planned: costs money)
 
 ### macOS: Developer ID + notarization
 
