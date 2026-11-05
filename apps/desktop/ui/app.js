@@ -43,6 +43,23 @@ async function act(button, fn) {
   }
 }
 
+/** In-app confirm (window.confirm isn't reliable in every webview). */
+function ask(text) {
+  return new Promise((resolve) => {
+    const d = $("confirm-dialog");
+    $("confirm-text").textContent = text;
+    const done = (v) => {
+      d.close();
+      $("confirm-yes").onclick = $("confirm-no").onclick = d.oncancel = null;
+      resolve(v);
+    };
+    $("confirm-yes").onclick = () => done(true);
+    $("confirm-no").onclick = () => done(false);
+    d.oncancel = (ev) => { ev.preventDefault(); done(false); };
+    d.showModal();
+  });
+}
+
 function el(tag, attrs = {}, ...children) {
   const e = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -101,8 +118,8 @@ function render() {
         el("div", { class: "grow" }, el("div", {}, d.name), el("div", { class: "sub" }, `${d.short}${d.online ? " · connected" : ""}`)),
         el("button", {
           class: "danger",
-          onclick: (ev) => {
-            if (!confirm(`Remove ${d.name}? It will be disconnected and need a new invite.`)) return;
+          onclick: async (ev) => {
+            if (!(await ask(`Remove ${d.name}? It will be disconnected and need a new invite.`))) return;
             act(ev.target, () => invoke("revoke", { id: d.id }));
           },
         }, "Remove"),
@@ -156,8 +173,8 @@ function render() {
         el("button", {
           class: "danger",
           title: "Forget this host",
-          onclick: (ev) => {
-            if (!confirm(`Forget ${h.name}?`)) return;
+          onclick: async (ev) => {
+            if (!(await ask(`Forget ${h.name}? You'll need a new invite to add it again.`))) return;
             act(ev.target, () => invoke("remove_host", { name: h.name }));
           },
         }, "✕"),
@@ -199,12 +216,20 @@ $("invite-btn").addEventListener("click", (ev) =>
 );
 
 $("invite-copy").addEventListener("click", async () => {
+  const text = $("invite-code").textContent;
   try {
-    await navigator.clipboard.writeText($("invite-code").textContent);
+    await navigator.clipboard.writeText(text);
     toast("Invite code copied.");
-  } catch (_) {
-    toast("Select the code and copy it.", true);
-  }
+    return;
+  } catch (_) {}
+  // Fallback for webviews without the async clipboard API.
+  const ta = el("textarea");
+  ta.value = text;
+  document.body.append(ta);
+  ta.select();
+  const ok = document.execCommand("copy");
+  ta.remove();
+  toast(ok ? "Invite code copied." : "Select the code and copy it.", !ok);
 });
 
 $("check-btn").addEventListener("click", (ev) =>
