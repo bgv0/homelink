@@ -1817,7 +1817,7 @@ dependencies = [
 
 [[package]]
 name = "homelink-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1829,7 +1829,7 @@ dependencies = [
 
 [[package]]
 name = "homelink-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1853,7 +1853,7 @@ dependencies = [
 
 [[package]]
 name = "homelink-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1873,7 +1873,7 @@ dependencies = [
 
 [[package]]
 name = "homelink-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "hex",
