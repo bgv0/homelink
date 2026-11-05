@@ -1,6 +1,7 @@
 // No console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod diag;
 mod tunnel;
 
 use std::collections::HashMap;
@@ -380,6 +381,55 @@ async fn connect(state: Shared<'_>, name: String, mode: Mode) -> Res<()> {
     Ok(())
 }
 
+/// A plain-text report for troubleshooting, with IP addresses masked.
+#[tauri::command]
+async fn diagnostics(app: AppHandle, state: Shared<'_>) -> Res<String> {
+    use std::fmt::Write;
+    let mut r = String::new();
+    let _ = writeln!(r, "homelink {} on {} {}", env!("CARGO_PKG_VERSION"), std::env::consts::OS, std::env::consts::ARCH);
+    let ov = overview(app, state.clone()).await?;
+    let s = &ov.settings;
+    let _ = writeln!(
+        r,
+        "Settings: port {}, upnp {}, approval {}, lan {}, share_on_launch {}, address {}",
+        s.port,
+        s.upnp,
+        s.require_approval,
+        s.allow_lan,
+        s.share_on_launch,
+        if s.public_addr.is_some() { "set" } else { "auto" }
+    );
+    match &ov.sharing {
+        Some(sh) => {
+            let tcp = state.host.lock().await.as_ref().map(|h| h.handle.tcp_enabled);
+            let _ = writeln!(r, "Sharing: on, tcp fallback {:?}, router: {}", tcp, sh.router);
+        }
+        None => r.push_str("Sharing: off\n"),
+    }
+    let online = ov.devices.iter().filter(|d| d.online).count();
+    let _ = writeln!(r, "Devices: {} paired, {} online", ov.devices.len(), online);
+    let _ = writeln!(r, "Saved hosts: {}", ov.hosts.len());
+    match &ov.connection {
+        Some(c) => {
+            let _ = writeln!(
+                r,
+                "Connection: {:?} via {:?}, connected {}, rtt {:?} ms, tunnel error {:?}",
+                c.mode, c.transport, c.connected, c.rtt_ms, c.tunnel_error
+            );
+        }
+        None => r.push_str("Connection: none\n"),
+    }
+    let check = reach::check().await;
+    let _ = writeln!(
+        r,
+        "Network check: {:?}, upnp {}, natpmp {}, lan {:?}, public {:?}, router {:?}",
+        check.verdict, check.upnp, check.natpmp, check.lan_ip, check.public_ip, check.router_wan_ip
+    );
+    r.push_str("\nRecent log:\n");
+    r.push_str(&diag::log_tail(state.store.dir(), 80));
+    Ok(diag::mask_ips(&r))
+}
+
 #[tauri::command]
 async fn repair_network(state: Shared<'_>) -> Res<()> {
     disconnect_client(state.inner()).await;
@@ -441,14 +491,9 @@ fn main() {
         std::process::exit(tunnel::helper_main(&args[2..]));
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("HOMELINK_LOG")
-                .unwrap_or_else(|_| "warn".into()),
-        )
-        .init();
-
     let store = Store::open_default().expect("couldn't open the homelink data folder");
+    diag::init_logging(store.dir());
+    tracing::info!("homelink {} starting", env!("CARGO_PKG_VERSION"));
     // Undo a system proxy change left behind if the app crashed while connected.
     sysproxy::recover(store.dir());
     let state = Arc::new(AppState {
@@ -479,6 +524,7 @@ fn main() {
             connect,
             disconnect,
             repair_network,
+            diagnostics,
         ])
         .setup(move |app| {
             let show = MenuItem::with_id(app, "show", "Open homelink", true, None::<&str>)?;

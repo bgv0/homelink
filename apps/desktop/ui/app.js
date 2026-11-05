@@ -261,12 +261,10 @@ $("invite-btn").addEventListener("click", (ev) =>
   }),
 );
 
-$("invite-copy").addEventListener("click", async () => {
-  const text = $("invite-code").textContent;
+async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    toast("Invite code copied.");
-    return;
+    return true;
   } catch (_) {}
   // Fallback for webviews without the async clipboard API.
   const ta = el("textarea");
@@ -275,8 +273,24 @@ $("invite-copy").addEventListener("click", async () => {
   ta.select();
   const ok = document.execCommand("copy");
   ta.remove();
+  return ok;
+}
+
+$("invite-copy").addEventListener("click", async () => {
+  const ok = await copyText($("invite-code").textContent);
   toast(ok ? "Invite code copied." : "Select the code and copy it.", !ok);
 });
+
+for (const b of document.querySelectorAll(".diag-btn")) {
+  b.addEventListener("click", (ev) =>
+    act(ev.target, async () => {
+      ev.target.textContent = "Collecting…";
+      const report = await invoke("diagnostics");
+      const ok = await copyText(report);
+      toast(ok ? "Diagnostics copied. Paste them into your message." : "Couldn't copy diagnostics.", !ok);
+    }),
+  );
+}
 
 $("check-btn").addEventListener("click", (ev) =>
   act(ev.target, async () => {

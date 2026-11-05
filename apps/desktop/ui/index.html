@@ -66,7 +66,10 @@
       <details class="card">
         <summary>Network check</summary>
         <p class="muted">Finds out whether other networks can reach this computer.</p>
-        <button id="check-btn">Check my network</button>
+        <div class="row">
+          <button id="check-btn">Check my network</button>
+          <button class="diag-btn">Copy diagnostics</button>
+        </div>
         <div id="check-result" hidden>
           <dl>
             <dt>This computer</dt><dd id="check-lan">—</dd>
@@ -125,7 +128,11 @@
       <details class="card">
         <summary>Trouble?</summary>
         <p class="muted">If your internet stops working after homelink closed unexpectedly, this puts your network settings back.</p>
-        <button id="repair-btn">Repair network settings</button>
+        <div class="row">
+          <button id="repair-btn">Repair network settings</button>
+          <button class="diag-btn">Copy diagnostics</button>
+        </div>
+        <p class="muted small">Diagnostics are a text summary for troubleshooting. IP addresses are partly hidden.</p>
       </details>
 
       <details class="card" id="add-card">
