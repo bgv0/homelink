@@ -1,8 +1,11 @@
 //! "Can people reach me?" checks for the host: CGNAT and double-NAT detection.
 
 use std::net::IpAddr;
+use std::time::Duration;
 
 use serde::Serialize;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 use crate::{portmap, stun};
 
@@ -59,6 +62,43 @@ pub async fn check() -> Report {
         Err(_) => (false, None),
     };
     Report { lan_ip, public_ip, router_wan_ip, upnp, verdict: judge(public_ip, router_wan_ip) }
+}
+
+/// Re-checks the public IP in the background. Stops when dropped.
+pub struct PublicIpWatch {
+    pub ip: watch::Receiver<Option<IpAddr>>,
+    task: JoinHandle<()>,
+}
+
+impl PublicIpWatch {
+    /// `initial` is the address already known (if any); checks every `every`.
+    pub fn start(initial: Option<IpAddr>, every: Duration) -> Self {
+        let (tx, ip) = watch::channel(initial);
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(every).await;
+                // Keep the last known address if the check fails (e.g. offline).
+                if let Some(now) = stun::public_ip().await {
+                    tx.send_if_modified(|cur| {
+                        let changed = *cur != Some(now);
+                        *cur = Some(now);
+                        changed
+                    });
+                }
+            }
+        });
+        PublicIpWatch { ip, task }
+    }
+
+    pub fn current(&self) -> Option<IpAddr> {
+        *self.ip.borrow()
+    }
+}
+
+impl Drop for PublicIpWatch {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 #[cfg(test)]

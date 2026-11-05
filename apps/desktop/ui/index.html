@@ -26,6 +26,7 @@
       </div>
 
       <div class="card" id="share-status" hidden>
+        <p class="warn" id="share-ip-changed" hidden></p>
         <dl>
           <dt>Address</dt><dd id="share-address">—</dd>
           <dt>Router</dt><dd id="share-router">—</dd>
@@ -124,6 +125,19 @@
       <button id="pair-deny">Deny</button>
       <button class="primary" id="pair-allow">Allow</button>
     </div>
+  </dialog>
+
+  <dialog id="edit-dialog">
+    <form id="edit-form" method="dialog">
+      <h2>Edit <span id="edit-title"></span></h2>
+      <p class="muted">Use this if the host's address changed. Pasting a new invite from the host works too.</p>
+      <label>Address <input type="text" id="edit-addr" required autocomplete="off" spellcheck="false"></label>
+      <label>UDP port <input type="number" id="edit-port" min="1" max="65535" required></label>
+      <div class="row end">
+        <button type="button" id="edit-cancel">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
   </dialog>
 
   <dialog id="confirm-dialog">

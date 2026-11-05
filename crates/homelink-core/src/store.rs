@@ -213,12 +213,36 @@ impl Store {
         self.save("hosts.json", &hosts, false)
     }
 
+    /// Change where a saved host is reached (after its IP changed).
+    pub fn update_host_address(&self, name: &str, addr: &str, port: u16) -> Result<()> {
+        if !homelink_proto::valid_host_addr(addr) {
+            return Err(anyhow!("'{addr}' isn't a valid hostname or IP address"));
+        }
+        if port == 0 {
+            return Err(anyhow!("port must be 1-65535"));
+        }
+        let mut hosts = self.hosts()?;
+        let h = hosts
+            .iter_mut()
+            .find(|h| h.name == name)
+            .ok_or_else(|| anyhow!("no saved host called '{name}'"))?;
+        h.addr = addr.to_string();
+        h.port = port;
+        self.save("hosts.json", &hosts, false)
+    }
+
     pub fn remove_host(&self, name: &str) -> Result<bool> {
         let mut hosts = self.hosts()?;
         let before = hosts.len();
         hosts.retain(|h| h.name != name);
         self.save("hosts.json", &hosts, false)?;
         Ok(hosts.len() != before)
+    }
+
+    /// Saved host with this device id, if any.
+    pub fn host_by_id(&self, id: &DeviceId) -> Option<SavedHost> {
+        let hex = id_hex(id);
+        self.hosts().ok()?.into_iter().find(|h| h.id == hex)
     }
 
     /// Find a saved host by name, or the only one if `name` is None.

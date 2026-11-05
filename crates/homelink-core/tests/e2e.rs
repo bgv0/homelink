@@ -210,3 +210,21 @@ async fn unreachable_host_times_out_quickly() {
     assert!(r.is_err());
     assert!(start.elapsed() < Duration::from_secs(12));
 }
+
+#[tokio::test]
+async fn known_device_can_reuse_new_invite_to_update_address() {
+    let env = setup(true).await;
+    let _ = env.paired_client().await;
+    let identity = env.client_store.identity().unwrap();
+    let again = client::pair(&identity, &env.invite(600), "test laptop", Some("home"))
+        .await
+        .unwrap();
+    assert_eq!(again.port, env.host.local_addr.port());
+    assert_eq!(env.host_store.devices().unwrap().len(), 1, "no duplicate device");
+
+    env.client_store.save_host(again.clone()).unwrap();
+    env.client_store.update_host_address("home", "localhost", 4000).unwrap();
+    let h = env.client_store.find_host(Some("home")).unwrap();
+    assert_eq!((h.addr.as_str(), h.port), ("localhost", 4000));
+    assert!(env.client_store.update_host_address("home", "bad host!", 1).is_err());
+}

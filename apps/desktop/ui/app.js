@@ -106,6 +106,12 @@ function render() {
     const r = $("share-router");
     r.textContent = s.router;
     r.className = s.router_ok === true ? "ok" : s.router_ok === false ? "warn" : "";
+    const changed = $("share-ip-changed");
+    changed.hidden = !s.address_changed_from;
+    if (s.address_changed_from) {
+      changed.textContent = `Your public address changed from ${s.address_changed_from} to ${s.address}. ` +
+        "Devices can't find this computer until you send them a new invite (or set a DDNS name in settings).";
+    }
     $("share-traffic").textContent = `↑ ${bytes(s.down)} sent to devices · ↓ ${bytes(s.up)} from devices`;
   }
 
@@ -170,6 +176,7 @@ function render() {
                 await invoke("connect", { name: h.name, systemProxy: $("use-system-proxy").checked });
               }),
             }, "Connect"),
+        el("button", { title: "Edit address", onclick: () => editHost(h) }, "Edit"),
         el("button", {
           class: "danger",
           title: "Forget this host",
@@ -292,6 +299,37 @@ $("add-form").addEventListener("submit", (ev) => {
     } finally {
       $("add-note").textContent = "";
     }
+  });
+});
+
+// ---------- edit host address ----------
+
+let editing = null;
+
+function editHost(h) {
+  editing = h;
+  $("edit-title").textContent = h.name;
+  $("edit-addr").value = h.addr;
+  $("edit-port").value = h.port;
+  $("edit-dialog").showModal();
+}
+
+$("edit-cancel").addEventListener("click", () => $("edit-dialog").close());
+
+$("edit-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const h = editing;
+  if (!h) return;
+  act(ev.submitter, async () => {
+    await invoke("update_host", {
+      name: h.name,
+      addr: $("edit-addr").value.trim(),
+      port: Number($("edit-port").value),
+    });
+    $("edit-dialog").close();
+    toast(state.connection && state.connection.host === h.name
+      ? "Saved. Disconnect and connect again to use the new address."
+      : "Saved.");
   });
 });
 

@@ -26,7 +26,9 @@ const PREFERRED_SOCKS: &str = "127.0.0.1:1080";
 struct RunningHost {
     handle: HostHandle,
     mapper: Option<PortMapper>,
-    public_ip: Option<IpAddr>,
+    /// Public IP when sharing started, and a watcher for changes.
+    started_ip: Option<IpAddr>,
+    ip_watch: reach::PublicIpWatch,
     port: u16,
 }
 
@@ -68,6 +70,9 @@ struct SharingView {
     router_ok: Option<bool>,
     up: u64,
     down: u64,
+    /// Set when the public IP changed since sharing started and no DDNS
+    /// name is configured: the old address devices still have saved.
+    address_changed_from: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -121,9 +126,12 @@ async fn overview(app: AppHandle, state: Shared<'_>) -> Res<Overview> {
                 MapState::Unavailable(e) => (format!("{e}. Forward the port on your router by hand."), Some(false)),
             },
         };
+        let now_ip = h.ip_watch.current();
+        let changed = settings.public_addr.is_none() && h.started_ip.is_some() && now_ip != h.started_ip;
         SharingView {
             port: h.port,
-            address: settings.public_addr.clone().or(h.public_ip.map(|i| i.to_string())),
+            address: settings.public_addr.clone().or(now_ip.map(|i| i.to_string())),
+            address_changed_from: changed.then(|| h.started_ip.map(|i| i.to_string())).flatten(),
             router,
             router_ok,
             up: h.handle.traffic.up.load(Ordering::Relaxed),
@@ -204,7 +212,8 @@ async fn start_host(app: &AppHandle, state: &Arc<AppState>) -> Res<()> {
         .await
         .map_err(err)?;
     let mapper = s.upnp.then(|| PortMapper::start(s.port));
-    *slot = Some(RunningHost { handle, mapper, public_ip, port: s.port });
+    let ip_watch = reach::PublicIpWatch::start(public_ip, Duration::from_secs(300));
+    *slot = Some(RunningHost { handle, mapper, started_ip: public_ip, ip_watch, port: s.port });
     Ok(())
 }
 
@@ -281,11 +290,18 @@ async fn check_network() -> Res<reach::Report> {
 async fn add_host(state: Shared<'_>, code: String, name: Option<String>) -> Res<SavedHost> {
     let inv = Invite::decode(&code).map_err(err)?;
     let identity = state.store.identity().map_err(err)?;
+    // Re-adding a known host just updates its address; keep its name.
+    let name = name.or_else(|| state.store.host_by_id(&inv.host_id).map(|h| h.name));
     let saved = client::pair(&identity, &inv, &computer_name(), name.as_deref())
         .await
         .map_err(err)?;
     state.store.save_host(saved.clone()).map_err(err)?;
     Ok(saved)
+}
+
+#[tauri::command]
+fn update_host(state: Shared<'_>, name: String, addr: String, port: u16) -> Res<()> {
+    state.store.update_host_address(&name, addr.trim(), port).map_err(err)
 }
 
 #[tauri::command]
@@ -405,6 +421,7 @@ fn main() {
             revoke,
             check_network,
             add_host,
+            update_host,
             remove_host,
             connect,
             disconnect,

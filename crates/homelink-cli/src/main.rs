@@ -62,6 +62,13 @@ enum Cmd {
     Hosts,
     /// Forget a saved host.
     Remove { name: String },
+    /// Change a saved host's address (e.g. after its IP changed).
+    SetAddress {
+        name: String,
+        address: String,
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Connect to a host and run a local SOCKS5 proxy.
     Connect {
         /// Saved host name (optional if there's only one).
@@ -161,6 +168,7 @@ async fn run(cli: Cli) -> Result<()> {
             let identity = store.identity()?;
             let device_name = device_name.unwrap_or_else(computer_name);
             println!("Contacting {}:{} ... the host may need to approve this device.", inv.addr, inv.port);
+            let name = name.or_else(|| store.host_by_id(&inv.host_id).map(|h| h.name));
             let saved = client::pair(&identity, &inv, &device_name, name.as_deref()).await?;
             println!("Paired. Saved as '{}'. Connect with: homelink connect", saved.name);
             store.save_host(saved)?;
@@ -182,6 +190,12 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 println!("No saved host called {name}.");
             }
+            Ok(())
+        }
+        Cmd::SetAddress { name, address, port } => {
+            let current = store.find_host(Some(&name))?;
+            store.update_host_address(&name, &address, port.unwrap_or(current.port))?;
+            println!("{name} now points to {address}:{}.", port.unwrap_or(current.port));
             Ok(())
         }
         Cmd::Connect { host, socks: socks_addr } => {
@@ -229,6 +243,20 @@ async fn run_host(store: Store, s: HostSettings) -> Result<()> {
         opts.blocked.push(ip);
     }
     let handle = host::start(store.clone(), opts, cli_approver()).await?;
+    let ip_watch = reach::PublicIpWatch::start(public, std::time::Duration::from_secs(300));
+    if s.public_addr.is_none() {
+        let mut rx = ip_watch.ip.clone();
+        let port = s.port;
+        tokio::spawn(async move {
+            while rx.changed().await.is_ok() {
+                if let Some(ip) = *rx.borrow() {
+                    println!(
+                        "Your public address changed to {ip}. Devices need it: run `homelink set-address <host> {ip} --port {port}` on each, or send a new invite."
+                    );
+                }
+            }
+        });
+    }
     let id = store.identity()?.id;
     println!("Sharing on UDP port {} (device {}).", handle.local_addr.port(), short_id(&id));
     match (&s.public_addr, public) {
@@ -279,6 +307,7 @@ async fn run_host(store: Store, s: HostSettings) -> Result<()> {
     println!("Create an invite in another terminal with `homelink invite`. Ctrl-C to stop.");
     tokio::signal::ctrl_c().await?;
     println!("Stopping ...");
+    drop(ip_watch);
     handle.shutdown().await;
     if let Some(m) = mapper {
         m.stop().await;
