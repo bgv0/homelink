@@ -1,0 +1,31 @@
+# Operating system and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local credentials and configuration (examples may be committed)
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+config/local/
+
+# Dependencies and build products
+node_modules/
+target/
+dist/
+build/
+coverage/
+
+# Runtime data and diagnostic captures
+*.log
+*.pcap
+*.pcapng
+.homelink/
+
