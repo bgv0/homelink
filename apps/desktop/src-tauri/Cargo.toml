@@ -19,3 +19,7 @@ tracing-subscriber.workspace = true
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-single-instance = "2"
+clap.workspace = true
+tun2proxy = { version = "0.8", default-features = false }
+# Saves the original routes/DNS so a killed helper can be cleaned up later.
+tproxy-config = { version = "7", default-features = false, features = ["unsafe-state-file"] }

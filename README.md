@@ -5,7 +5,7 @@ a direct, encrypted connection. One app for **macOS and Windows**: either
 computer can **Share** (host) or **Connect** (client).
 
 ```text
-Client apps → system proxy → local SOCKS5 → QUIC, direct and encrypted
+Client apps → system proxy or TUN → local SOCKS5 → QUIC, direct and encrypted
            → host's forwarded UDP port → host → internet
 ```
 
@@ -29,8 +29,15 @@ but it **hasn't been tried on real networks yet**. See [the plan](docs/PLAN.md).
 - Speed is limited by the host's upload bandwidth.
 - Firewalls: the Windows installer adds an inbound UDP rule for homelink. On
   macOS, if the firewall is on, allow incoming connections when asked.
-- Connect mode currently uses the system proxy setting: browsers and most apps
-  follow it, but some apps and games don't. Full-tunnel mode is planned.
+- Connect has three modes:
+  - **System proxy** (default, no password): browsers and most apps follow it,
+    some apps and games don't.
+  - **Full tunnel** (asks for your admin password each time): all TCP traffic
+    and DNS go through the host. UDP apps (some games, video calls) don't work
+    through it yet. On macOS, IPv6 isn't routed into the tunnel yet.
+  - **SOCKS5 only**: point apps at 127.0.0.1:1080 yourself.
+- If your internet stops working after homelink crashed in full-tunnel mode,
+  use **Connect → Trouble? → Repair network settings**.
 
 ## Using the app
 
@@ -70,8 +77,8 @@ Pushing a `v*` tag builds unsigned installers into a draft GitHub release.
 ```text
 crates/homelink-proto   wire format, invite codes
 crates/homelink-core    host, client, SOCKS5, UPnP, system proxy
+apps/desktop            Tauri app; full tunnel via tun2proxy (src-tauri/src/tunnel.rs)
 crates/homelink-cli     `homelink` command
-apps/desktop            Tauri app (src-tauri = Rust, ui = HTML/CSS/JS)
 docs/                   plan and research notes
 ```
 

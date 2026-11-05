@@ -1,6 +1,8 @@
 // No console window on Windows release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod tunnel;
+
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,11 +34,25 @@ struct RunningHost {
     port: u16,
 }
 
+/// How a connected client sends this computer's traffic to the host.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Mode {
+    /// Only a local SOCKS5 proxy; nothing is changed on the system.
+    Proxy,
+    /// OS proxy setting points at the SOCKS5 proxy (no admin needed).
+    System,
+    /// Everything goes through a TUN device (admin prompt).
+    Tunnel,
+}
+
 struct RunningClient {
     client: Arc<Client>,
     task: JoinHandle<()>,
     socks: SocketAddr,
+    mode: Mode,
     system_proxy: bool,
+    tunnel: Option<tunnel::Tunnel>,
 }
 
 struct AppState {
@@ -79,7 +95,8 @@ struct SharingView {
 struct ConnectionView {
     host: String,
     socks: String,
-    system_proxy: bool,
+    mode: Mode,
+    tunnel_error: Option<String>,
     connected: bool,
     rtt_ms: Option<u64>,
     up: u64,
@@ -145,7 +162,8 @@ async fn overview(app: AppHandle, state: Shared<'_>) -> Res<Overview> {
             Some(ConnectionView {
                 host: c.client.host.name.clone(),
                 socks: c.socks.to_string(),
-                system_proxy: c.system_proxy,
+                mode: c.mode,
+                tunnel_error: c.tunnel.as_ref().and_then(|t| t.failed()),
                 connected: rtt.is_some(),
                 rtt_ms: rtt.map(|d| d.as_millis() as u64),
                 up: c.client.traffic.up.load(Ordering::Relaxed),
@@ -314,9 +332,20 @@ async fn remove_host(state: Shared<'_>, name: String) -> Res<()> {
 }
 
 #[tauri::command]
-async fn connect(state: Shared<'_>, name: String, system_proxy: bool) -> Res<()> {
+async fn connect(state: Shared<'_>, name: String, mode: Mode) -> Res<()> {
     disconnect_client(state.inner()).await;
-    let saved = state.store.find_host(Some(&name)).map_err(err)?;
+    let mut saved = state.store.find_host(Some(&name)).map_err(err)?;
+    // Resolve the host now. In tunnel mode DNS goes through the tunnel, so a
+    // later lookup would loop; pin the IP for this session.
+    let host_ip = tokio::net::lookup_host((saved.addr.as_str(), saved.port))
+        .await
+        .ok()
+        .and_then(|mut it| it.find(|a| a.is_ipv4()))
+        .map(|a| a.ip())
+        .ok_or_else(|| format!("Can't find the address '{}'.", saved.addr))?;
+    if mode == Mode::Tunnel {
+        saved.addr = host_ip.to_string();
+    }
     let client = Arc::new(Client::new(&state.store.identity().map_err(err)?, saved).map_err(err)?);
     client.connection().await.map_err(err)?;
     let listener = match tokio::net::TcpListener::bind(PREFERRED_SOCKS).await {
@@ -330,21 +359,36 @@ async fn connect(state: Shared<'_>, name: String, system_proxy: bool) -> Res<()>
             let _ = socks::serve(client, listener).await;
         }
     });
-    let mut running = RunningClient { client, task, socks: socks_addr, system_proxy: false };
-    if system_proxy {
-        if let Err(e) = sysproxy::enable(state.store.dir(), socks_addr) {
-            running.task.abort();
-            running.client.disconnect().await;
-            return Err(err(e));
-        }
-        running.system_proxy = true;
+    let mut running =
+        RunningClient { client, task, socks: socks_addr, mode, system_proxy: false, tunnel: None };
+    let applied = match mode {
+        Mode::Proxy => Ok(()),
+        Mode::System => sysproxy::enable(state.store.dir(), socks_addr).map(|_| running.system_proxy = true).map_err(err),
+        Mode::Tunnel => tunnel::Tunnel::start(state.store.dir(), socks_addr, host_ip)
+            .await
+            .map(|t| running.tunnel = Some(t)),
+    };
+    if let Err(e) = applied {
+        running.task.abort();
+        running.client.disconnect().await;
+        return Err(e);
     }
     *state.client.lock().await = Some(running);
     Ok(())
 }
 
+#[tauri::command]
+async fn repair_network(state: Shared<'_>) -> Res<()> {
+    disconnect_client(state.inner()).await;
+    sysproxy::recover(state.store.dir());
+    tunnel::repair(state.store.dir()).await
+}
+
 async fn disconnect_client(state: &AppState) {
     if let Some(c) = state.client.lock().await.take() {
+        if let Some(t) = c.tunnel {
+            t.stop().await;
+        }
         if c.system_proxy {
             sysproxy::recover(state.store.dir());
         }
@@ -388,6 +432,12 @@ async fn cleanup(state: &AppState) {
 }
 
 fn main() {
+    // Elevated helper for full-tunnel mode: no window, no app state.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some(tunnel::HELPER_FLAG) {
+        std::process::exit(tunnel::helper_main(&args[2..]));
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("HOMELINK_LOG")
@@ -425,6 +475,7 @@ fn main() {
             remove_host,
             connect,
             disconnect,
+            repair_network,
         ])
         .setup(move |app| {
             let show = MenuItem::with_id(app, "show", "Open homelink", true, None::<&str>)?;

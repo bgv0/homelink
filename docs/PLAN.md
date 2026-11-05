@@ -4,8 +4,9 @@ Written 2026-11-05.
 
 **Status (2026-11-05):** built but not yet tested on real networks. Done:
 protocol, core engine, CLI, desktop app (system-proxy mode), CI on macOS and
-Windows, and a release workflow for unsigned installers. Not done: full-tunnel
-TUN mode, signing, and every manual network test in the gates below. Automated
+Windows, a release workflow for unsigned installers, and full-tunnel mode via
+an elevated helper. Not done: signing, and every manual network test in the
+gates below. Automated
 loopback tests pass.
 
 **Direction:** a public, open-source app for **anyone who can port-forward**. One simple app on
@@ -108,7 +109,15 @@ Client apps
 - **Client routing, step 1 (built): system proxy.** Connect points the OS proxy
   setting at the local SOCKS5 server (macOS `networksetup`, Windows registry),
   with crash recovery. Browsers and most apps follow it; no admin helper needed.
-- **Client system-wide routing, step 2 (not built): TUN full tunnel**:
+- **Client system-wide routing, step 2 (built, untested): TUN full tunnel.**
+  The app re-launches itself elevated in helper mode (macOS `osascript` admin
+  prompt, Windows UAC) and runs tun2proxy with `--setup --dns virtual`,
+  bypassing the host IP. A heartbeat file makes the helper restore the network
+  if the app dies; tproxy-config's state file plus a "Repair network" button
+  cover a killed helper. Wintun is bundled on Windows. Known gaps: macOS IPv6
+  isn't routed into the tunnel; UDP (other than DNS) is dropped. A signed
+  privileged helper (SMAppService / Windows service) would remove the
+  per-connect password prompt. Original design notes:
   - TUN engine: evaluate **tun2proxy** (Rust, MIT/Apache, in-process, supports
     macOS and Windows/wintun) first, because it keeps one binary and a permissive
     licence. Fall back to sing-box (GPLv3, separate process) if tun2proxy fails

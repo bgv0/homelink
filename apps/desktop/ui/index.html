@@ -90,6 +90,7 @@
         <div>
           <h1 id="conn-title">Not connected</h1>
           <p class="muted" id="conn-sub">Connect to a computer that's sharing its internet.</p>
+          <p class="bad" id="conn-error" hidden></p>
         </div>
         <button class="primary" id="conn-disconnect" hidden>Disconnect</button>
       </div>
@@ -98,8 +99,21 @@
         <h2>Hosts</h2>
         <ul class="list" id="host-list"></ul>
         <p class="muted empty" id="host-empty">No hosts yet. Add one with an invite code below.</p>
-        <label class="check"><input type="checkbox" id="use-system-proxy" checked> Send this computer's apps through the host</label>
+        <label>When connected
+          <select id="conn-mode">
+            <option value="system">Send apps through the host (system proxy)</option>
+            <option value="tunnel">Send all traffic through the host (asks for admin password)</option>
+            <option value="proxy">Only run a SOCKS5 proxy on 127.0.0.1:1080</option>
+          </select>
+        </label>
+        <p class="muted small" id="mode-help"></p>
       </div>
+
+      <details class="card">
+        <summary>Trouble?</summary>
+        <p class="muted">If your internet stops working after homelink closed unexpectedly, this puts your network settings back.</p>
+        <button id="repair-btn">Repair network settings</button>
+      </details>
 
       <details class="card" id="add-card">
         <summary>Add a host</summary>

@@ -32,9 +32,28 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Build installer
+      - name: Fetch Wintun (Windows full-tunnel driver)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        working-directory: apps/desktop/src-tauri
+        run: |
+          curl -sSfLO https://www.wintun.net/builds/wintun-0.14.1.zip
+          echo "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51  wintun-0.14.1.zip" | sha256sum -c -
+          unzip -q wintun-0.14.1.zip
+          mkdir -p wintun-bundle
+          cp wintun/bin/amd64/wintun.dll wintun-bundle/wintun.dll
+          cp wintun/LICENSE.txt wintun-bundle/wintun-LICENSE.txt
+      - name: Build installer (macOS)
+        if: matrix.os == 'macos-latest'
         working-directory: apps/desktop/src-tauri
         run: npx -y @tauri-apps/cli@2 build ${{ matrix.args }}
+      - name: Build installer (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        working-directory: apps/desktop/src-tauri
+        run: >
+          npx -y @tauri-apps/cli@2 build
+          --config '{"bundle":{"resources":{"wintun-bundle/wintun.dll":"wintun.dll","wintun-bundle/wintun-LICENSE.txt":"wintun-LICENSE.txt"}}}'
       - name: Upload to draft release
         shell: bash
         env:

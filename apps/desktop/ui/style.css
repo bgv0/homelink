@@ -197,6 +197,7 @@ form label {
   margin: 10px 0 0;
 }
 
+select,
 form input[type="text"],
 form input[type="number"],
 form textarea {
@@ -250,3 +251,6 @@ dialog {
 }
 
 dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+
+label > select { margin-top: 4px; }
+.small { font-size: 12px; }

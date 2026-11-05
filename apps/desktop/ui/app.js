@@ -154,10 +154,16 @@ function render() {
     ? [
         c.rtt_ms != null ? `Ping ${c.rtt_ms} ms` : null,
         `↑ ${bytes(c.up)} ↓ ${bytes(c.down)}`,
-        c.system_proxy ? "Apps on this computer go through the host" : `Proxy at ${c.socks} (SOCKS5)`,
+        {
+          system: "Apps go through the host",
+          tunnel: "All traffic goes through the host",
+          proxy: `SOCKS5 proxy at ${c.socks}`,
+        }[c.mode],
       ].filter(Boolean).join(" · ")
     : "Connect to a computer that's sharing its internet.";
   $("conn-disconnect").hidden = !c;
+  $("conn-error").hidden = !(c && c.tunnel_error);
+  $("conn-error").textContent = (c && c.tunnel_error) || "";
   $("conn-card").classList.toggle("on", !!(c && c.connected));
 
   const hl = $("host-list");
@@ -173,7 +179,9 @@ function render() {
               class: "primary",
               onclick: (ev) => act(ev.target, async () => {
                 ev.target.textContent = "Connecting…";
-                await invoke("connect", { name: h.name, systemProxy: $("use-system-proxy").checked });
+                const mode = $("conn-mode").value;
+                if (mode === "tunnel") ev.target.textContent = "Waiting for password…";
+                await invoke("connect", { name: h.name, mode });
               }),
             }, "Connect"),
         el("button", { title: "Edit address", onclick: () => editHost(h) }, "Edit"),
@@ -301,6 +309,37 @@ $("add-form").addEventListener("submit", (ev) => {
     }
   });
 });
+
+// ---------- connection mode ----------
+
+const MODE_HELP = {
+  system: "Browsers and most apps follow this. Some apps and games ignore it. No password needed.",
+  tunnel: "Everything goes through the host, including apps that ignore proxy settings. Asks for your admin password each time you connect.",
+  proxy: "Nothing changes on this computer. Point individual apps at the SOCKS5 proxy yourself.",
+};
+
+function showModeHelp() {
+  $("mode-help").textContent = MODE_HELP[$("conn-mode").value];
+}
+
+$("conn-mode").addEventListener("change", () => {
+  showModeHelp();
+  try { localStorage.setItem("mode", $("conn-mode").value); } catch (_) {}
+});
+
+try {
+  const saved = localStorage.getItem("mode");
+  if (saved && MODE_HELP[saved]) $("conn-mode").value = saved;
+} catch (_) {}
+showModeHelp();
+
+$("repair-btn").addEventListener("click", (ev) =>
+  act(ev.target, async () => {
+    ev.target.textContent = "Repairing…";
+    await invoke("repair_network");
+    toast("Network settings restored.");
+  }),
+);
 
 // ---------- edit host address ----------
 
