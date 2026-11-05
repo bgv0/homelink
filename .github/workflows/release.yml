@@ -21,7 +21,7 @@ jobs:
             bundles: target/universal-apple-darwin/release/bundle/dmg/*.dmg
           - os: windows-latest
             args: ""
-            bundles: target/release/bundle/nsis/*.exe target/release/bundle/msi/*.msi
+            bundles: target/release/bundle/nsis/*.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

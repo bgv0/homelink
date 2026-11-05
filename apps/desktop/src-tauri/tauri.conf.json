@@ -24,7 +24,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": [
+      "app",
+      "dmg",
+      "nsis"
+    ],
     "category": "Utility",
     "shortDescription": "Share your internet connection directly with your own devices",
     "icon": [
@@ -33,6 +37,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
   }
 }

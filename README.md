@@ -27,6 +27,8 @@ but it **hasn't been tried on real networks yet**. See [the plan](docs/PLAN.md).
   connections can't host**; use *Network check* in the app to find out.
 - Networks that block UDP (some schools, hotels, offices) can't connect yet.
 - Speed is limited by the host's upload bandwidth.
+- Firewalls: the Windows installer adds an inbound UDP rule for homelink. On
+  macOS, if the firewall is on, allow incoming connections when asked.
 - Connect mode currently uses the system proxy setting: browsers and most apps
   follow it, but some apps and games don't. Full-tunnel mode is planned.
 
