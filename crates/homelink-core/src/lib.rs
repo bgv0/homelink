@@ -14,6 +14,7 @@ pub mod socks;
 mod splice;
 pub mod store;
 pub mod stun;
+pub mod sysproxy;
 pub mod tls;
 
 pub use homelink_proto as proto;

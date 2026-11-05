@@ -29,3 +29,6 @@ coverage/
 *.pcapng
 .homelink/
 
+
+# Tauri generated files
+apps/desktop/src-tauri/gen/

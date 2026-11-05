@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>homelink</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <nav class="tabs" role="tablist">
+      <button role="tab" id="tab-share" aria-selected="true" data-tab="share">Share</button>
+      <button role="tab" id="tab-connect" aria-selected="false" data-tab="connect">Connect</button>
+    </nav>
+  </header>
+
+  <main>
+    <!-- SHARE: this computer is the host -->
+    <section id="panel-share" role="tabpanel">
+      <div class="card hero">
+        <div>
+          <h1 id="share-title">Not sharing</h1>
+          <p class="muted" id="share-sub">Let your other devices use this computer's internet connection.</p>
+        </div>
+        <button class="primary" id="share-toggle">Start sharing</button>
+      </div>
+
+      <div class="card" id="share-status" hidden>
+        <dl>
+          <dt>Address</dt><dd id="share-address">—</dd>
+          <dt>Router</dt><dd id="share-router">—</dd>
+          <dt>Traffic</dt><dd id="share-traffic">—</dd>
+        </dl>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <h2>Devices</h2>
+          <button id="invite-btn">Invite a device</button>
+        </div>
+        <div id="invite-box" hidden>
+          <p class="muted">Give this code to the other device. It works once and expires in 15 minutes.</p>
+          <div class="code-row">
+            <code id="invite-code"></code>
+            <button id="invite-copy">Copy</button>
+          </div>
+        </div>
+        <ul class="list" id="device-list"></ul>
+        <p class="muted empty" id="device-empty">No devices yet.</p>
+      </div>
+
+      <details class="card">
+        <summary>Network check</summary>
+        <p class="muted">Finds out whether other networks can reach this computer.</p>
+        <button id="check-btn">Check my network</button>
+        <div id="check-result" hidden>
+          <dl>
+            <dt>This computer</dt><dd id="check-lan">—</dd>
+            <dt>Public address</dt><dd id="check-public">—</dd>
+            <dt>Router address</dt><dd id="check-wan">—</dd>
+          </dl>
+          <p id="check-verdict"></p>
+        </div>
+      </details>
+
+      <details class="card">
+        <summary>Sharing settings</summary>
+        <form id="settings-form">
+          <label>UDP port <input type="number" id="set-port" min="1" max="65535" required></label>
+          <label>Address for invites <span class="muted">(DDNS name; blank = detect)</span>
+            <input type="text" id="set-address" placeholder="myhome.duckdns.org" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="check"><input type="checkbox" id="set-upnp"> Forward the port automatically (UPnP)</label>
+          <label class="check"><input type="checkbox" id="set-approval"> Ask before a new device can join</label>
+          <label class="check"><input type="checkbox" id="set-lan"> Let devices reach my local network</label>
+          <label class="check"><input type="checkbox" id="set-launch"> Start sharing when homelink opens</label>
+          <label class="check"><input type="checkbox" id="set-autostart"> Open homelink when I log in</label>
+          <div class="row">
+            <span class="muted" id="settings-note"></span>
+            <button type="submit" class="primary">Save</button>
+          </div>
+        </form>
+      </details>
+    </section>
+
+    <!-- CONNECT: this computer is the client -->
+    <section id="panel-connect" role="tabpanel" hidden>
+      <div class="card hero" id="conn-card">
+        <div>
+          <h1 id="conn-title">Not connected</h1>
+          <p class="muted" id="conn-sub">Connect to a computer that's sharing its internet.</p>
+        </div>
+        <button class="primary" id="conn-disconnect" hidden>Disconnect</button>
+      </div>
+
+      <div class="card">
+        <h2>Hosts</h2>
+        <ul class="list" id="host-list"></ul>
+        <p class="muted empty" id="host-empty">No hosts yet. Add one with an invite code below.</p>
+        <label class="check"><input type="checkbox" id="use-system-proxy" checked> Send this computer's apps through the host</label>
+      </div>
+
+      <details class="card" id="add-card">
+        <summary>Add a host</summary>
+        <form id="add-form">
+          <label>Invite code <textarea id="add-code" rows="3" required spellcheck="false" placeholder="homelink1-…"></textarea></label>
+          <label>Name <input type="text" id="add-name" placeholder="Home" autocomplete="off"></label>
+          <div class="row">
+            <span class="muted" id="add-note"></span>
+            <button type="submit" class="primary">Add</button>
+          </div>
+        </form>
+      </details>
+    </section>
+  </main>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <dialog id="pair-dialog">
+    <h2>New device</h2>
+    <p><strong id="pair-name"></strong> wants to use your internet connection.</p>
+    <p class="muted">Device <span id="pair-id"></span></p>
+    <div class="row end">
+      <button id="pair-deny">Deny</button>
+      <button class="primary" id="pair-allow">Allow</button>
+    </div>
+  </dialog>
+
+  <script src="app.js"></script>
+</body>
+</html>

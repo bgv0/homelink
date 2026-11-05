@@ -59,6 +59,8 @@ pub struct HostSettings {
     pub upnp: bool,
     /// Ask before pairing a new device.
     pub require_approval: bool,
+    /// Desktop app: start sharing as soon as the app opens.
+    pub share_on_launch: bool,
 }
 
 impl Default for HostSettings {
@@ -69,6 +71,7 @@ impl Default for HostSettings {
             public_addr: None,
             upnp: true,
             require_approval: true,
+            share_on_launch: false,
         }
     }
 }
