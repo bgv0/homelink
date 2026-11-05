@@ -16,6 +16,9 @@ use crate::natpmp;
 
 const LEASE: Duration = Duration::from_secs(3600);
 const RETRY: Duration = Duration::from_secs(300);
+/// Renew well before the lease ends. Timers pause while the computer sleeps,
+/// so a short interval limits how long a mapping can be missing after wake.
+const RENEW: Duration = Duration::from_secs(600);
 const DESCRIPTION: &str = "homelink";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +94,7 @@ impl Mapping {
 async fn try_map(port: u16) -> Result<(Mapping, Option<IpAddr>, Duration), String> {
     let upnp_err = match find_gateway().await {
         Ok(gw) => match map_once(&gw, port).await {
-            Ok(ip) => return Ok((Mapping::Upnp(gw), ip, LEASE / 2)),
+            Ok(ip) => return Ok((Mapping::Upnp(gw), ip, RENEW)),
             Err(e) => e,
         },
         Err(e) => e,
@@ -101,7 +104,7 @@ async fn try_map(port: u16) -> Result<(Mapping, Option<IpAddr>, Duration), Strin
         Ok(m) if m.external_port == port => {
             let _ = natpmp::map_tcp(gw, port, LEASE.as_secs() as u32).await;
             let ip = natpmp::external_ip(gw).await.map(IpAddr::V4);
-            let renew = Duration::from_secs((u64::from(m.lifetime) / 2).max(60));
+            let renew = Duration::from_secs((u64::from(m.lifetime) / 2).max(60)).min(RENEW);
             Ok((Mapping::NatPmp(gw), ip, renew))
         }
         Ok(m) => {
