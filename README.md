@@ -1,5 +1,8 @@
 # homelink
 
+> **Discontinued — 6 November 2026.** Development and maintenance have ended. This repository is archived and retained for historical reference. No further releases or support are planned.
+
+
 Share your home internet connection with your own devices (or friends') through
 a direct, encrypted connection. One app for **macOS and Windows**: either
 computer can **Share** (host) or **Connect** (client).
@@ -21,6 +24,11 @@ Client apps → system proxy or TUN → local SOCKS5
 forwarding, pairing and connecting, step by step.
 
 ## Status
+
+Discontinued as of 6 November 2026. This project is no longer maintained.
+The documentation below is historical and does not imply ongoing support.
+
+### Last recorded development state
 
 Early preview. It builds and its automated tests pass on macOS and Windows,
 and it has been smoke-tested on one Mac (host and client on the same
